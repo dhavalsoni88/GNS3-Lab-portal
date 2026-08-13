@@ -228,6 +228,15 @@ def user_record(username: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
+def account_display_name(username: str) -> str:
+    """Return a friendly account label while keeping usernames immutable."""
+    account = user_record(username)
+    if not account:
+        return username
+    name = " ".join(part for part in (account.get("first_name"), account.get("last_name")) if part)
+    return name or str(account["username"])
+
+
 def list_users() -> list[dict[str, Any]]:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
@@ -664,6 +673,7 @@ def format_backup_datetime(value: Any) -> str:
 
 
 templates.env.filters["backup_datetime"] = format_backup_datetime
+templates.env.filters["account_display_name"] = account_display_name
 
 
 def local_snapshot_file(project: dict[str, Any], snapshot: dict[str, Any]) -> Path | None:

@@ -1,8 +1,17 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.4 is the current cumulative
+delivered as cumulative update packages; v8.5.5 is the current cumulative
 source release.
+
+## v8.5.5 — Account menu and display name
+
+- Replace header text links with one compact account button containing an
+  avatar icon and the signed-in user's display name.
+- Use the configured first and last name when available; otherwise use the
+  immutable username.
+- Place My Profile, Administrator-only Manage Users, and Sign out in the
+  expandable account menu.
 
 ## v8.5.4 — Bulk backup actions
 
