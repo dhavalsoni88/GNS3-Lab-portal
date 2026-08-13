@@ -1,8 +1,14 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.4.9 is the current cumulative
+delivered as cumulative update packages; v8.4.10 is the current cumulative
 source release.
+
+## v8.4.10 — User administration layout
+
+- Place **View as user** beside each username.
+- Place **Save** alongside the corresponding password-update field.
+- Remove the redundant Impersonate column.
 
 ## v8.4.9 — Header navigation cleanup
 
