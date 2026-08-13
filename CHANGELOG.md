@@ -4,6 +4,17 @@ All notable portal changes are documented here. Versions before v7.6 were
 delivered as cumulative update packages; v8.4.4 is the current cumulative
 source release.
 
+## v8.4.5 — Backup-source panel visibility
+
+- Show shared lab templates and retained backups only while **Existing lab
+  backup** is selected.
+- Keep the **Upload backup file** view limited to the upload form.
+
+## v8.4.6 — Collapsible audit trail
+
+- Rename **Recent activity** to **Audit trail**.
+- Keep audit records collapsed until the user selects the Audit trail control.
+
 ## v8.4.4 — Single-use backup templates
 
 - Treat a shared backup as a single-use lab template.
