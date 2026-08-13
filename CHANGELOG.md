@@ -1,8 +1,13 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.5 is the current cumulative
+delivered as cumulative update packages; v8.5.6 is the current cumulative
 source release.
+
+## v8.5.6 — Dismissible account menu
+
+- Close the account menu when the user clicks or taps outside it.
+- Close the account menu when the user presses `Esc`.
 
 ## v8.5.5 — Account menu and display name
 
