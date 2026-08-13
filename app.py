@@ -133,9 +133,10 @@ def init_db() -> None:
             created_at TEXT NOT NULL
         )""")
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
-        for name in ("email", "first_name", "last_name"):
+        for name in ("email", "first_name", "last_name", "retained_backup_limit"):
             if name not in user_columns:
-                connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} TEXT")
+                column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
+                connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
         connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
             project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
             assigned_at TEXT NOT NULL
@@ -155,6 +156,17 @@ def init_db() -> None:
             project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
             shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
             PRIMARY KEY(project_id, snapshot_id, username)
+        )""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
+            template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
+            source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
+            name TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL,
+            UNIQUE(source_project_id, snapshot_id)
+        )""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
+            template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
+            subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
+            granted_at TEXT NOT NULL, PRIMARY KEY(template_id, subject_type, subject_id)
         )""")
         # Preserve the prior deployment path: the existing environment login
         # becomes the first local administrator on the first RBAC startup.
@@ -205,14 +217,14 @@ def password_matches(password: str, stored: str) -> bool:
 def user_record(username: str) -> dict[str, Any] | None:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name FROM portal_users WHERE username=?", (username,)).fetchone()
+        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name,retained_backup_limit FROM portal_users WHERE username=?", (username,)).fetchone()
     return dict(row) if row else None
 
 
 def list_users() -> list[dict[str, Any]]:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
-        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
+        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name,retained_backup_limit FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
     return [dict(row) for row in rows]
 
 
@@ -273,6 +285,40 @@ def retained_backups_for(username: str | None = None) -> list[dict[str, Any]]:
         connection.row_factory = sqlite3.Row
         rows = connection.execute(query, values).fetchall()
     return [dict(row) for row in rows]
+
+
+def retained_backup_limit(username: str) -> int:
+    account = user_record(username)
+    return max(0, int(account.get("retained_backup_limit") or 2)) if account else 2
+
+
+def retained_backup_count(username: str) -> int:
+    with sqlite3.connect(AUDIT_DB) as connection:
+        row = connection.execute("SELECT COUNT(*) FROM retained_backups WHERE owner=?", (username,)).fetchone()
+    return int(row[0])
+
+
+def templates_for_user(username: str, include_owned: bool = False) -> list[dict[str, Any]]:
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.row_factory = sqlite3.Row
+        if include_owned:
+            rows = connection.execute("SELECT * FROM lab_templates ORDER BY created_at DESC").fetchall()
+        else:
+            rows = connection.execute("SELECT DISTINCT t.* FROM lab_templates t LEFT JOIN lab_template_access a ON a.template_id=t.template_id WHERE t.owner=? OR (a.subject_type='local_user' AND a.subject_id=?) ORDER BY t.created_at DESC", (username, username)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def template_access_users(template_id: str) -> list[str]:
+    with sqlite3.connect(AUDIT_DB) as connection:
+        rows = connection.execute("SELECT subject_id FROM lab_template_access WHERE template_id=? AND subject_type='local_user' ORDER BY subject_id COLLATE NOCASE", (template_id,)).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def template_record(template_id: str) -> dict[str, Any] | None:
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM lab_templates WHERE template_id=?", (template_id,)).fetchone()
+    return dict(row) if row else None
 
 
 
@@ -867,7 +913,7 @@ async def profile_page(request: Request):
 
 
 @app.post("/profile")
-async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), current_password: str = Form(""), new_password: str = Form("")):
+async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), new_password: str = Form(""), confirm_new_password: str = Form("")):
     if AUTH_ENABLED and not request.session.get("user"):
         return redirect_login()
     username = signed_in_user(request)
@@ -882,8 +928,10 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
     if new_password:
         if len(new_password) < 12:
             return RedirectResponse("/profile?error=New+password+must+be+at+least+12+characters", status_code=303)
-        if not current_password or not password_matches(current_password, str(account["password_hash"])):
-            return RedirectResponse("/profile?error=Current+password+is+incorrect", status_code=303)
+        if new_password != confirm_new_password:
+            return RedirectResponse("/profile?error=New+passwords+do+not+match", status_code=303)
+    elif confirm_new_password:
+        return RedirectResponse("/profile?error=Enter+the+new+password+in+both+fields", status_code=303)
     with sqlite3.connect(AUDIT_DB) as connection:
         if new_password:
             connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, password_hash(new_password), username))
@@ -918,12 +966,14 @@ async def admin_create_user(request: Request, username: str = Form(...), passwor
 
 
 @app.post("/admin/users/{username}/update")
-async def admin_update_user(request: Request, username: str, role: str = Form(...), enabled: str = Form("0"), password: str = Form("")):
+async def admin_update_user(request: Request, username: str, role: str = Form(...), enabled: str = Form("0"), password: str = Form(""), retained_backup_limit: int = Form(2)):
     require_admin(request)
     target = user_record(username)
     role = role.strip().lower()
     if not target or role not in {"admin", "user"}:
         raise HTTPException(404, "User not found.")
+    if retained_backup_limit < 0 or retained_backup_limit > 100:
+        return RedirectResponse("/admin/users?error=Retained+backup+limit+must+be+between+0+and+100", status_code=303)
     if target["username"].lower() == signed_in_user(request).lower() and enabled != "1":
         return RedirectResponse("/admin/users?error=You+cannot+disable+your+own+account", status_code=303)
     if target.get("role") == "admin" and target.get("enabled") and (role != "admin" or enabled != "1") and enabled_admin_count() <= 1:
@@ -932,10 +982,10 @@ async def admin_update_user(request: Request, username: str, role: str = Form(..
         if password:
             if len(password) < 12:
                 return RedirectResponse("/admin/users?error=Passwords+must+be+at+least+12+characters", status_code=303)
-            connection.execute("UPDATE portal_users SET role=?,enabled=?,password_hash=? WHERE username=?", (role, 1 if enabled == "1" else 0, password_hash(password), target["username"]))
+            connection.execute("UPDATE portal_users SET role=?,enabled=?,password_hash=?,retained_backup_limit=? WHERE username=?", (role, 1 if enabled == "1" else 0, password_hash(password), retained_backup_limit, target["username"]))
         else:
-            connection.execute("UPDATE portal_users SET role=?,enabled=? WHERE username=?", (role, 1 if enabled == "1" else 0, target["username"]))
-    audit(audit_actor(request), "update_user", target["username"], {"role": role, "enabled": enabled == "1", "password_reset": bool(password)})
+            connection.execute("UPDATE portal_users SET role=?,enabled=?,retained_backup_limit=? WHERE username=?", (role, 1 if enabled == "1" else 0, retained_backup_limit, target["username"]))
+    audit(audit_actor(request), "update_user", target["username"], {"role": role, "enabled": enabled == "1", "password_reset": bool(password), "retained_backup_limit": retained_backup_limit})
     return RedirectResponse("/admin/users?message=User+updated", status_code=303)
 
 
@@ -1024,6 +1074,64 @@ async def remove_backup_share(request: Request, project_id: str, snapshot_id: st
     return RedirectResponse(f"/projects/{project_id}?message=Backup+sharing+updated", status_code=303)
 
 
+@app.post("/projects/{project_id}/snapshots/{snapshot_id}/template")
+async def create_lab_template(request: Request, project_id: str, snapshot_id: str, name: str = Form(...), description: str = Form("")):
+    require_project_access(request, project_id)
+    if not can_manage_lab_sharing(request, project_id):
+        raise HTTPException(403, "Only the lab owner or an Administrator can create a template.")
+    name, description = name.strip(), description.strip()
+    if not name or len(name) > 100 or len(description) > 500:
+        return RedirectResponse(f"/projects/{project_id}?error=Use+a+template+name+of+1+to+100+characters", status_code=303)
+    snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
+    if not any(str(item.get("snapshot_id")) == snapshot_id for item in snapshots):
+        raise HTTPException(404, "Backup not found.")
+    template_id = str(uuid.uuid4())
+    try:
+        with sqlite3.connect(AUDIT_DB) as connection:
+            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,created_at) VALUES(?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, datetime.now(timezone.utc).isoformat()))
+    except sqlite3.IntegrityError:
+        return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template", status_code=303)
+    audit(audit_actor(request), "create_lab_template", project_id, {"template_id": template_id, "snapshot_id": snapshot_id, "name": name})
+    return RedirectResponse(f"/projects/{project_id}?message=Lab+template+created", status_code=303)
+
+
+@app.post("/templates/{template_id}/access")
+async def grant_template_access(request: Request, template_id: str, username: str = Form(...)):
+    template = template_record(template_id)
+    if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
+        raise HTTPException(404, "Lab template not found.")
+    target = user_record(username.strip())
+    if not target or not target.get("enabled"):
+        return RedirectResponse(f"/projects/{template['source_project_id']}?error=Choose+an+enabled+portal+user", status_code=303)
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.execute("INSERT INTO lab_template_access(template_id,subject_type,subject_id,granted_by,granted_at) VALUES(?,?,?,?,?) ON CONFLICT(template_id,subject_type,subject_id) DO UPDATE SET granted_by=excluded.granted_by,granted_at=excluded.granted_at", (template_id, "local_user", target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
+    audit(audit_actor(request), "grant_lab_template", template["source_project_id"], {"template_id": template_id, "username": target["username"]})
+    return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+shared", status_code=303)
+
+
+@app.post("/templates/{template_id}/access/{username}/remove")
+async def revoke_template_access(request: Request, template_id: str, username: str):
+    template = template_record(template_id)
+    if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
+        raise HTTPException(404, "Lab template not found.")
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.execute("DELETE FROM lab_template_access WHERE template_id=? AND subject_type='local_user' AND subject_id=?", (template_id, username))
+    audit(audit_actor(request), "revoke_lab_template", template["source_project_id"], {"template_id": template_id, "username": username})
+    return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+access+updated", status_code=303)
+
+
+@app.post("/templates/{template_id}/unpublish")
+async def unpublish_template(request: Request, template_id: str):
+    template = template_record(template_id)
+    if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
+        raise HTTPException(404, "Lab template not found.")
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.execute("DELETE FROM lab_template_access WHERE template_id=?", (template_id,))
+        connection.execute("DELETE FROM lab_templates WHERE template_id=?", (template_id,))
+    audit(audit_actor(request), "unpublish_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"]})
+    return RedirectResponse(f"/projects/{template['source_project_id']}?message=Lab+template+unpublished", status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     if AUTH_ENABLED and not request.session.get("user"):
@@ -1058,6 +1166,16 @@ async def dashboard(request: Request):
             snapshot = next((item for item in source_snapshots if str(item.get("snapshot_id")) == shared["snapshot_id"]), None)
             if snapshot:
                 shared_backup_sources.append({"project_id": shared["project_id"], "snapshot_id": shared["snapshot_id"], "project_name": source_project.get("name", "Shared lab"), "snapshot_name": snapshot.get("name", "Unnamed backup")})
+    available_templates: list[dict[str, Any]] = []
+    if AUTH_ENABLED:
+        for template in templates_for_user(current_user(request), include_owned=has_admin_scope(request)):
+            try:
+                source_project = await gns3("GET", f"/v2/projects/{template['source_project_id']}")
+                source_snapshots = await gns3("GET", f"/v2/projects/{template['source_project_id']}/snapshots")
+            except HTTPException:
+                continue
+            if any(str(item.get("snapshot_id")) == template["snapshot_id"] for item in source_snapshots):
+                available_templates.append({**template, "source_project_name": source_project.get("name", "Template source"), "access_users": template_access_users(template["template_id"])})
     # The dashboard action is deliberately derived from node state, rather
     # than project open/closed state. Built-in Cloud and Ethernet switch nodes
     # are always reported as started by GNS3 and are not lab workloads.
@@ -1072,7 +1190,7 @@ async def dashboard(request: Request):
         project["can_share"] = can_manage_lab_sharing(request, project["project_id"])
         project["lab_group"] = "user" if has_admin_scope(request) and project["owner"] not in {current_user(request), "Unassigned"} else "mine"
     return templates.TemplateResponse(request, "dashboard.html", {
-        "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "user": current_user(request),
+        "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "available_templates": available_templates, "user": current_user(request),
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
         "portal_users": [account for account in list_users() if account.get("enabled")],
@@ -1147,6 +1265,10 @@ async def project_page(request: Request, project_id: str):
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "can_share": can_manage_lab_sharing(request, project_id), "lab_owner": lab_owner(project_id), "portal_users": [account for account in list_users() if account.get("enabled")],
         "snapshot_shared_with": {str(item.get("snapshot_id")): backup_shared_users(project_id, str(item.get("snapshot_id"))) for item in snapshots},
+        "snapshot_templates": {str(item["snapshot_id"]): item for item in templates_for_user(current_user(request), include_owned=has_admin_scope(request)) if item["source_project_id"] == project_id},
+        "template_access": {item["template_id"]: template_access_users(item["template_id"]) for item in templates_for_user(current_user(request), include_owned=has_admin_scope(request)) if item["source_project_id"] == project_id},
+        "retained_remaining": max(0, retained_backup_limit(current_user(request)) - retained_backup_count(current_user(request))),
+        "retained_limit": retained_backup_limit(current_user(request)),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
         "backup_job_id": backup_job_id,
         "import_job_id": request.query_params.get("import_job", ""),
@@ -1292,6 +1414,18 @@ async def create_lab_from_shared_backup(request: Request, source_project_id: str
     return RedirectResponse(f"/?import_job={job_id}", status_code=303)
 
 
+@app.post("/template-imports")
+async def create_lab_from_template(request: Request, template_id: str = Form(...), name: str = Form(...)):
+    user = current_user(request)
+    template = template_record(template_id)
+    if not template:
+        raise HTTPException(404, "Lab template not found.")
+    allowed = has_admin_scope(request) or template["owner"] == user or user in template_access_users(template_id)
+    if not allowed:
+        raise HTTPException(404, "Lab template not found.")
+    return await queue_snapshot_import(request, str(template["source_project_id"]), str(template["snapshot_id"]), name)
+
+
 @app.post("/retained-backup-imports")
 async def create_lab_from_retained_backup(request: Request, backup_id: str = Form(...), name: str = Form(...)):
     user = current_user(request)
@@ -1399,6 +1533,10 @@ async def restore_snapshot(request: Request, project_id: str, snapshot_id: str):
 async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
     user = current_user(request)
     require_project_access(request, project_id)
+    with sqlite3.connect(AUDIT_DB) as connection:
+        template_exists = connection.execute("SELECT 1 FROM lab_templates WHERE source_project_id=? AND snapshot_id=?", (project_id, snapshot_id)).fetchone()
+    if template_exists:
+        return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+published+as+a+lab+template+and+cannot+be+deleted", status_code=303)
     try:
         await ensure_project_open(project_id)
         await gns3("DELETE", f"/v2/projects/{project_id}/snapshots/{snapshot_id}")
@@ -1411,7 +1549,7 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
 
 
 @app.post("/projects/{project_id}/delete")
-async def delete_project(request: Request, project_id: str, confirmation: str = Form(...), keep_backups: str = Form("")):
+async def delete_project(request: Request, project_id: str, confirmation: str = Form(...), retained_snapshot_ids: list[str] = Form([])):
     user = current_user(request)
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
@@ -1419,14 +1557,25 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
     project = await gns3("GET", f"/v2/projects/{project_id}")
     if confirmation.strip() != project.get("name"):
         return RedirectResponse(f"/projects/{project_id}?error=Lab+name+did+not+match", status_code=303)
+    with sqlite3.connect(AUDIT_DB) as connection:
+        template_exists = connection.execute("SELECT 1 FROM lab_templates WHERE source_project_id=?", (project_id,)).fetchone()
+    if template_exists:
+        return RedirectResponse(f"/projects/{project_id}?error=This+lab+contains+published+templates.+Remove+template+access+and+unpublish+them+before+deleting+the+lab", status_code=303)
     retained = 0
-    if keep_backups == "keep":
+    if retained_snapshot_ids:
         if not GNS3_PROJECTS_DIR:
             return RedirectResponse(f"/projects/{project_id}?error=Configure+GNS3_PROJECTS_DIR+before+keeping+backups", status_code=303)
         snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
+        selected = {snapshot_id for snapshot_id in retained_snapshot_ids if snapshot_id}
+        selected_snapshots = [snapshot for snapshot in snapshots if str(snapshot.get("snapshot_id")) in selected]
+        if len(selected_snapshots) != len(selected):
+            return RedirectResponse(f"/projects/{project_id}?error=One+or+more+selected+backups+were+not+found", status_code=303)
+        available = retained_backup_limit(user) - retained_backup_count(user)
+        if len(selected_snapshots) > available:
+            return RedirectResponse(f"/projects/{project_id}?error={quote_plus(f'You can retain only {max(available, 0)} more backup(s). Your limit is {retained_backup_limit(user)}.')}", status_code=303)
         target_dir = RETAINED_BACKUP_DIR / project_id
         target_dir.mkdir(parents=True, exist_ok=True)
-        for snapshot in snapshots:
+        for snapshot in selected_snapshots:
             source = local_snapshot_file(project, snapshot)
             if not source:
                 return RedirectResponse(f"/projects/{project_id}?error=One+or+more+native+backup+files+could+not+be+found", status_code=303)

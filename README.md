@@ -1,6 +1,6 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.4.10**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.5.0**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
 
 ## Local users, roles, and lab ownership
@@ -18,7 +18,7 @@ network.
 Every authenticated user has **My Profile** in the portal header. Username is
 intentionally immutable because it identifies lab ownership. Users may add an
 optional first name, last name, and email address, and may change their own
-password after confirming the current password.
+password by entering and confirming a new password.
 
 New and restored labs are automatically assigned to the signed-in user. The
 Administrator sees all labs; existing labs remain Administrator-only until an
@@ -60,6 +60,20 @@ own separate powered-off lab. Once that import succeeds, the recipient's share
 is automatically removed; a failed import leaves it available to retry. The
 lab owner or an Administrator can revoke the share before it is used.
 
+## Reusable lab templates
+
+The owner or an Administrator can publish a completed backup as a reusable
+**Lab Template**. Unlike a one-time backup share, a template remains available
+to each permitted recipient and appears in **Create Lab → From Backup → Lab
+template catalog**. A lab created from a template is a separate powered-off
+project owned fully by its creator; it does not grant access to the template
+source lab.
+
+Current access grants are local-user assignments. The database also records a
+generic access subject type, so LDAP/Active Directory group assignments can be
+added later without redesigning templates. Published template backups and their
+source labs are protected from deletion to avoid breaking active templates.
+
 ## Retained backups on deletion
 
 Set `RETAINED_BACKUP_DIR=/HDD_STORE/my-lab-retained-backups`. When the
@@ -68,6 +82,13 @@ lab, the portal copies each native snapshot to this directory before deleting
 the GNS3 project. Retained backups appear in **Create Lab → From Backup** and
 can create a new powered-off lab later. The `www-data` service account needs
 write access to this mounted directory.
+
+Before deleting a lab, its owner selects exactly which native backups to copy
+to the retained archive. Each local user has a limit of **two** retained backup
+copies by default, regardless of which labs they came from. An Administrator
+can change the individual user's **Max copies** value in Manage Users. Existing
+copies are never deleted automatically when an Admin lowers the limit; the
+lower limit prevents only additional retained copies.
 
 The portal header is branded **My Lab**; selecting it always returns to the
 main dashboard.

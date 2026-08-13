@@ -1,8 +1,24 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.4.10 is the current cumulative
+delivered as cumulative update packages; v8.5.0 is the current cumulative
 source release.
+
+## v8.5.0 — Reusable lab templates and retained-backup quotas
+
+- Publish a completed lab backup as a reusable lab template.
+- Share templates with local users now through a generic access table prepared
+  for future LDAP/AD group assignments.
+- Let recipients create independent, fully owned labs from shared templates.
+- Let users choose exactly which backups to retain before deleting a lab.
+- Default each user to two retained-backup copies; allow an Administrator to
+  set an individual limit from 0 to 100.
+
+## v8.4.11 — Profile password and username clarity
+
+- Use New password and Confirm new password for signed-in profile changes.
+- Remove the current-password requirement from the authenticated profile flow.
+- Display the immutable username as text rather than a disabled-looking input.
 
 ## v8.4.10 — User administration layout
 
