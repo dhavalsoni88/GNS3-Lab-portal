@@ -606,8 +606,15 @@ def snapshot_storage(project: dict[str, Any], snapshots: list[dict[str, Any]]) -
         return snapshots, 0, True
     try:
         resolved_snapshots_dir = snapshots_dir.resolve(strict=True)
-        approved_root = (GNS3_SNAPSHOTS_DIR or project_path).resolve(strict=True)
-        resolved_snapshots_dir.relative_to(approved_root)
+        # A symlink must resolve into the configured HDD root. A normal
+        # directory inside this project is also safe to inspect, which keeps
+        # legacy, not-yet-migrated backup sizes and dates visible.
+        if snapshots_dir.is_symlink():
+            if not GNS3_SNAPSHOTS_DIR:
+                return snapshots, 0, False
+            resolved_snapshots_dir.relative_to(GNS3_SNAPSHOTS_DIR.resolve(strict=True))
+        else:
+            resolved_snapshots_dir.relative_to(project_path)
     except (OSError, ValueError):
         return snapshots, 0, False
 
@@ -673,9 +680,14 @@ def local_snapshot_file(project: dict[str, Any], snapshot: dict[str, Any]) -> Pa
         root = GNS3_PROJECTS_DIR.resolve(strict=True)
         project_path = Path(str(project.get("path", ""))).resolve(strict=True)
         project_path.relative_to(root)
-        snapshots_dir = (project_path / "snapshots").resolve(strict=True)
-        approved_root = (GNS3_SNAPSHOTS_DIR or project_path).resolve(strict=True)
-        snapshots_dir.relative_to(approved_root)
+        configured_snapshots_dir = project_path / "snapshots"
+        snapshots_dir = configured_snapshots_dir.resolve(strict=True)
+        if configured_snapshots_dir.is_symlink():
+            if not GNS3_SNAPSHOTS_DIR:
+                return None
+            snapshots_dir.relative_to(GNS3_SNAPSHOTS_DIR.resolve(strict=True))
+        else:
+            snapshots_dir.relative_to(project_path)
     except (OSError, ValueError):
         return None
 
@@ -693,6 +705,47 @@ def local_snapshot_file(project: dict[str, Any], snapshot: dict[str, Any]) -> Pa
         if stored.is_file() and not stored.is_symlink():
             return stored
     return None
+
+
+def ensure_hdd_snapshot_link(project: dict[str, Any]) -> tuple[bool, str]:
+    """Link an empty new portal lab to its dedicated HDD snapshot directory.
+
+    Existing non-empty directories are never moved or replaced. They remain
+    safe for a separate migration during a GNS3 maintenance window.
+    """
+    if not GNS3_PROJECTS_DIR or not GNS3_SNAPSHOTS_DIR:
+        return False, "HDD snapshot automation is not configured"
+    project_id = str(project.get("project_id", "")).strip()
+    if not project_id or Path(project_id).name != project_id:
+        return False, "controller returned an invalid project identifier"
+    try:
+        projects_root = GNS3_PROJECTS_DIR.resolve(strict=True)
+        snapshots_root = GNS3_SNAPSHOTS_DIR.resolve(strict=True)
+        project_path = Path(str(project.get("path", ""))).resolve(strict=True)
+        project_path.relative_to(projects_root)
+        snapshots_path = project_path / "snapshots"
+        if snapshots_path.is_symlink():
+            snapshots_path.resolve(strict=True).relative_to(snapshots_root)
+            return True, "snapshot directory is already linked to the HDD"
+        if snapshots_path.exists() and not snapshots_path.is_dir():
+            return False, "project snapshots path is not a directory"
+        if snapshots_path.exists() and any(snapshots_path.iterdir()):
+            return False, "project snapshots directory is not empty"
+
+        target = snapshots_root / project_id
+        target.mkdir(parents=True, exist_ok=True)
+        temporary_link = project_path / f".snapshots-portal-{uuid.uuid4().hex}"
+        temporary_link.symlink_to(target, target_is_directory=True)
+        try:
+            if snapshots_path.exists():
+                snapshots_path.rmdir()
+            temporary_link.replace(snapshots_path)
+        finally:
+            if temporary_link.is_symlink():
+                temporary_link.unlink(missing_ok=True)
+        return True, "snapshot directory linked to the HDD"
+    except (OSError, ValueError) as exc:
+        return False, f"could not create HDD snapshot link: {exc}"
 
 
 async def stream_project_export(project_id: str):
@@ -782,6 +835,14 @@ async def run_snapshot_import_job(job: dict[str, Any]) -> None:
         imported = await import_snapshot_as_new_project(job, snapshot_path)
         imported_id = str(imported.get("project_id", job["new_project_id"]))
         set_lab_owner(imported_id, str(job["actor"]))
+        linked, link_reason = await asyncio.to_thread(
+            ensure_hdd_snapshot_link,
+            await gns3("GET", f"/v2/projects/{imported_id}"),
+        )
+        if linked:
+            audit(str(job.get("audit_actor", job["actor"])), "link_lab_snapshots_to_hdd", imported_id, {"reason": link_reason})
+        else:
+            portal_logger.warning("snapshot_hdd_link_skipped project_id=%s reason=%s", imported_id, link_reason)
         # A shared backup is a single-use lab template, not ongoing access to
         # the source lab.  Consume only the recipient's matching grant after
         # the new project is created successfully; a failed import remains
@@ -1241,6 +1302,14 @@ async def create_project(request: Request, name: str = Form(...)):
         return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
     project = await gns3("POST", "/v2/projects", json={"name": name})
     set_lab_owner(project["project_id"], user)
+    linked, link_reason = await asyncio.to_thread(
+        ensure_hdd_snapshot_link,
+        await gns3("GET", f"/v2/projects/{project['project_id']}"),
+    )
+    if linked:
+        audit(audit_actor(request), "link_lab_snapshots_to_hdd", project["project_id"], {"reason": link_reason})
+    else:
+        portal_logger.warning("snapshot_hdd_link_skipped project_id=%s reason=%s", project["project_id"], link_reason)
     audit(audit_actor(request), "create_lab", project["project_id"], {"name": name, "owner": user})
     return RedirectResponse(f"/projects/{project['project_id']}", status_code=303)
 

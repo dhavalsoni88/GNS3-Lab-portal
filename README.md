@@ -1,6 +1,6 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.5.2**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.5.3**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
 
 ## Local users, roles, and lab ownership
@@ -251,7 +251,7 @@ If your HDD is mounted somewhere else, replace `/HDD_STORE` consistently in
 both `.env` and these commands. Verify the actual mount with `findmnt` before
 using it; do not use an unmounted directory as backup storage.
 
-### 5. Grant safe read access to GNS3 projects and snapshots
+### 5. Grant GNS3 and the portal access to snapshots
 
 The portal must read native snapshots to display their sizes, download them,
 or create a new lab from a backup. Keep files owned by `gns3`; grant the
@@ -267,6 +267,30 @@ sudo setfacl -R -m u:www-data:rX /HDD_STORE/gns3-snapshots
 sudo find /HDD_STORE/gns3-snapshots -type d \
   -exec setfacl -m d:u:www-data:rx {} +
 ```
+
+#### Automatic HDD links for new portal labs (v8.5.3)
+
+When `GNS3_PROJECTS_DIR` and `GNS3_SNAPSHOTS_DIR` are set, the portal can link
+an **empty, newly created or imported** lab's `snapshots` directory directly
+to `/HDD_STORE/gns3-snapshots/<project-id>`. This eliminates the need to run
+the migration script for future portal-created labs. The portal never moves an
+existing non-empty directory.
+
+Enable the narrowly scoped write access required for that operation and make
+sure GNS3 can write to HDD folders created by the portal:
+
+```bash
+sudo setfacl -m u:www-data:rwx,m::rwx /home/gns3/GNS3/projects
+sudo setfacl -m d:u:www-data:rwx,d:m::rwx /home/gns3/GNS3/projects
+
+sudo setfacl -m u:www-data:rwx,u:gns3:rwx,m::rwx /HDD_STORE/gns3-snapshots
+sudo setfacl -m d:u:www-data:rwx,d:u:gns3:rwx,d:m::rwx \
+  /HDD_STORE/gns3-snapshots
+```
+
+This applies only to labs created through the portal. Continue to use the
+migration script, while GNS3 is stopped, for pre-existing labs or labs created
+directly in GNS3.
 
 To confirm that the portal service account can read snapshots:
 

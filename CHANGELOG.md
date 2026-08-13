@@ -1,8 +1,17 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.2 is the current cumulative
+delivered as cumulative update packages; v8.5.3 is the current cumulative
 source release.
+
+## v8.5.3 — Automatic HDD storage for new labs
+
+- Link empty snapshot directories for labs created or imported through the
+  portal directly to their dedicated `GNS3_SNAPSHOTS_DIR` HDD location.
+- Never alter an existing non-empty snapshot directory; legacy labs remain
+  safe for separate maintenance-window migration.
+- Continue showing size and completion time for safe local snapshot folders,
+  so legacy backups remain visible before migration.
 
 ## v8.5.2 — Backup layout, size scan, and local time
 
