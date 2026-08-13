@@ -1,8 +1,17 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.4.6 is the current cumulative
+delivered as cumulative update packages; v8.4.8 is the current cumulative
 source release.
+
+## v8.4.8 — Profile, admin lab tabs, and share lookup
+
+- Add local user **My Profile** fields for optional name and email, along with
+  secure self-service password changes.
+- Split the Administrator Lab List into **My & unassigned labs** and **User
+  labs** tabs.
+- Replace full account dropdowns in lab and backup sharing with username
+  type-ahead suggestions.
 
 ## v8.4.7 — Deployment documentation
 

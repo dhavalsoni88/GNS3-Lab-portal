@@ -132,6 +132,10 @@ def init_db() -> None:
             role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         )""")
+        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
+        for name in ("email", "first_name", "last_name"):
+            if name not in user_columns:
+                connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} TEXT")
         connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
             project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
             assigned_at TEXT NOT NULL
@@ -201,14 +205,14 @@ def password_matches(password: str, stored: str) -> bool:
 def user_record(username: str) -> dict[str, Any] | None:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute("SELECT username,password_hash,role,enabled,created_at FROM portal_users WHERE username=?", (username,)).fetchone()
+        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name FROM portal_users WHERE username=?", (username,)).fetchone()
     return dict(row) if row else None
 
 
 def list_users() -> list[dict[str, Any]]:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
-        rows = connection.execute("SELECT username,role,enabled,created_at FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
+        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
     return [dict(row) for row in rows]
 
 
@@ -847,6 +851,48 @@ async def logout(request: Request):
     return redirect_login()
 
 
+@app.get("/profile", response_class=HTMLResponse)
+async def profile_page(request: Request):
+    if AUTH_ENABLED and not request.session.get("user"):
+        return redirect_login()
+    username = signed_in_user(request)
+    account = user_record(username)
+    if not account:
+        raise HTTPException(404, "Profile not found.")
+    return templates.TemplateResponse(request, "profile.html", {
+        "profile": account, "user": current_user(request), "signed_in_user": username,
+        "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
+        "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
+    })
+
+
+@app.post("/profile")
+async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), current_password: str = Form(""), new_password: str = Form("")):
+    if AUTH_ENABLED and not request.session.get("user"):
+        return redirect_login()
+    username = signed_in_user(request)
+    account = user_record(username)
+    if not account:
+        raise HTTPException(404, "Profile not found.")
+    email, first_name, last_name = email.strip(), first_name.strip(), last_name.strip()
+    if len(email) > 254 or len(first_name) > 80 or len(last_name) > 80:
+        return RedirectResponse("/profile?error=Profile+fields+are+too+long", status_code=303)
+    if email and ("@" not in email or email.startswith("@") or email.endswith("@")):
+        return RedirectResponse("/profile?error=Enter+a+valid+email+address", status_code=303)
+    if new_password:
+        if len(new_password) < 12:
+            return RedirectResponse("/profile?error=New+password+must+be+at+least+12+characters", status_code=303)
+        if not current_password or not password_matches(current_password, str(account["password_hash"])):
+            return RedirectResponse("/profile?error=Current+password+is+incorrect", status_code=303)
+    with sqlite3.connect(AUDIT_DB) as connection:
+        if new_password:
+            connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, password_hash(new_password), username))
+        else:
+            connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=? WHERE username=?", (email or None, first_name or None, last_name or None, username))
+    audit(username, "update_profile", username, {"email_set": bool(email), "name_set": bool(first_name or last_name), "password_changed": bool(new_password)})
+    return RedirectResponse("/profile?message=Profile+updated", status_code=303)
+
+
 @app.get("/admin/users", response_class=HTMLResponse)
 async def admin_users(request: Request):
     require_admin(request)
@@ -1024,11 +1070,14 @@ async def dashboard(request: Request):
         project["owner"] = lab_owner(project["project_id"]) or "Unassigned"
         project["shared_with"] = shared_users(project["project_id"])
         project["can_share"] = can_manage_lab_sharing(request, project["project_id"])
+        project["lab_group"] = "user" if has_admin_scope(request) and project["owner"] not in {current_user(request), "Unassigned"} else "mine"
     return templates.TemplateResponse(request, "dashboard.html", {
         "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "user": current_user(request),
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
         "portal_users": [account for account in list_users() if account.get("enabled")],
+        "my_lab_count": sum(1 for project in projects if project["lab_group"] == "mine"),
+        "user_lab_count": sum(1 for project in projects if project["lab_group"] == "user"),
         "retained_backups": retained_backups_for(None if has_admin_scope(request) else current_user(request)),
         "gns3_url": GNS3_URL, "audit": recent_audit(username=current_user(request), include_all=has_admin_scope(request)),
         "import_job_id": request.query_params.get("import_job", ""),

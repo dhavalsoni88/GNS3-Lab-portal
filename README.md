@@ -1,6 +1,6 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.4.6**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.4.8**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
 
 ## Local users, roles, and lab ownership
@@ -14,6 +14,11 @@ Passwords are stored as salted `scrypt` hashes in the portal SQLite database;
 they are never stored in plain text in the database. Keep a long random
 `PORTAL_SECRET_KEY` and use HTTPS before exposing the portal outside a trusted
 network.
+
+Every authenticated user has **My Profile** in the portal header. Username is
+intentionally immutable because it identifies lab ownership. Users may add an
+optional first name, last name, and email address, and may change their own
+password after confirming the current password.
 
 New and restored labs are automatically assigned to the signed-in user. The
 Administrator sees all labs; existing labs remain Administrator-only until an
@@ -34,6 +39,14 @@ enabled portal User or Admin. Shared users can see and manage that lab from
 their own Lab List. The original owner remains unchanged; only the owner or an
 Administrator can share, revoke access, or delete the lab. Administrators can
 also share any lab. Every share and revoke action is written to the audit log.
+
+Sharing uses a username type-ahead input rather than a complete account
+dropdown. Start typing the intended username, select the suggestion, then
+share. The server validates that the selected account exists and is enabled.
+
+Administrators see ownership tabs in Lab List: **My & unassigned labs** and
+**User labs**. This keeps their own work and unassigned projects separate from
+other users' assigned labs without changing Administrator permissions.
 
 The login screen is intentionally minimal and is titled **My Lab Portal**.
 
