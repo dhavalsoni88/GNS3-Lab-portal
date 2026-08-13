@@ -41,6 +41,7 @@ AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1"
 AUDIT_DB = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
 UPLOAD_DIR = Path(os.getenv("PORTAL_UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
 RETAINED_BACKUP_DIR = Path(os.getenv("RETAINED_BACKUP_DIR", "/mnt/HDD_STORE/my-lab-retained-backups")).expanduser()
+LAB_TEMPLATE_DIR = Path(os.getenv("LAB_TEMPLATE_DIR", "/mnt/HDD_STORE/my-lab-templates")).expanduser()
 # Optional local root used to report native snapshot storage sizes. The GNS3
 # API provides snapshot metadata but does not include filesystem usage.
 GNS3_PROJECTS_DIR_VALUE = os.getenv("GNS3_PROJECTS_DIR", "").strip()
@@ -122,6 +123,7 @@ def init_db() -> None:
     AUDIT_DB.parent.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     RETAINED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    LAB_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
             id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
@@ -160,9 +162,14 @@ def init_db() -> None:
         connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
             template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
             source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
-            name TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL,
+            name TEXT NOT NULL, description TEXT, archive_path TEXT, size_bytes INTEGER,
+            created_at TEXT NOT NULL,
             UNIQUE(source_project_id, snapshot_id)
         )""")
+        template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
+        for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER")):
+            if name not in template_columns:
+                connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
         connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
             template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
             subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
@@ -756,6 +763,10 @@ async def run_snapshot_import_job(job: dict[str, Any]) -> None:
             snapshot_path = Path(str(job["retained_path"])).resolve(strict=True)
             snapshot_path.relative_to(RETAINED_BACKUP_DIR.resolve(strict=True))
             job.update(status="preparing", progress_percent=5, message="Preparing the retained backup…")
+        elif job.get("template_path"):
+            snapshot_path = Path(str(job["template_path"])).resolve(strict=True)
+            snapshot_path.relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
+            job.update(status="preparing", progress_percent=5, message="Preparing the lab template…")
         else:
             job.update(status="preparing", progress_percent=5, message="Looking up the selected backup…")
             project = await gns3("GET", f"/v2/projects/{source_project_id}")
@@ -1083,14 +1094,28 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
     if not name or len(name) > 100 or len(description) > 500:
         return RedirectResponse(f"/projects/{project_id}?error=Use+a+template+name+of+1+to+100+characters", status_code=303)
     snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
-    if not any(str(item.get("snapshot_id")) == snapshot_id for item in snapshots):
+    snapshot = next((item for item in snapshots if str(item.get("snapshot_id")) == snapshot_id), None)
+    if not snapshot:
         raise HTTPException(404, "Backup not found.")
     template_id = str(uuid.uuid4())
+    source = local_snapshot_file(await gns3("GET", f"/v2/projects/{project_id}"), snapshot)
+    if not source:
+        return RedirectResponse(f"/projects/{project_id}?error=This+backup+cannot+be+read+locally.+Configure+snapshot+storage+access+first", status_code=303)
+    template_dir = LAB_TEMPLATE_DIR / template_id
+    destination = template_dir / "template.gns3snapshot"
     try:
+        template_dir.mkdir(parents=True, exist_ok=False)
+        await asyncio.to_thread(shutil.copy2, source, destination)
+        if destination.stat().st_size != source.stat().st_size:
+            raise OSError("Template archive size verification failed")
         with sqlite3.connect(AUDIT_DB) as connection:
-            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,created_at) VALUES(?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, datetime.now(timezone.utc).isoformat()))
+            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat()))
     except sqlite3.IntegrityError:
+        shutil.rmtree(template_dir, ignore_errors=True)
         return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template", status_code=303)
+    except OSError:
+        shutil.rmtree(template_dir, ignore_errors=True)
+        return RedirectResponse(f"/projects/{project_id}?error=The+template+archive+could+not+be+created", status_code=303)
     audit(audit_actor(request), "create_lab_template", project_id, {"template_id": template_id, "snapshot_id": snapshot_id, "name": name})
     return RedirectResponse(f"/projects/{project_id}?message=Lab+template+created", status_code=303)
 
@@ -1128,8 +1153,14 @@ async def unpublish_template(request: Request, template_id: str):
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.execute("DELETE FROM lab_template_access WHERE template_id=?", (template_id,))
         connection.execute("DELETE FROM lab_templates WHERE template_id=?", (template_id,))
+    archive_path = Path(str(template.get("archive_path") or ""))
+    try:
+        archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
+        shutil.rmtree(archive_path.parent, ignore_errors=True)
+    except (OSError, ValueError):
+        pass
     audit(audit_actor(request), "unpublish_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"]})
-    return RedirectResponse(f"/projects/{template['source_project_id']}?message=Lab+template+unpublished", status_code=303)
+    return RedirectResponse("/?message=Lab+template+unpublished", status_code=303)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1169,13 +1200,12 @@ async def dashboard(request: Request):
     available_templates: list[dict[str, Any]] = []
     if AUTH_ENABLED:
         for template in templates_for_user(current_user(request), include_owned=has_admin_scope(request)):
+            archive_path = Path(str(template.get("archive_path") or ""))
             try:
-                source_project = await gns3("GET", f"/v2/projects/{template['source_project_id']}")
-                source_snapshots = await gns3("GET", f"/v2/projects/{template['source_project_id']}/snapshots")
-            except HTTPException:
+                archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
+            except (OSError, ValueError):
                 continue
-            if any(str(item.get("snapshot_id")) == template["snapshot_id"] for item in source_snapshots):
-                available_templates.append({**template, "source_project_name": source_project.get("name", "Template source"), "access_users": template_access_users(template["template_id"])})
+            available_templates.append({**template, "access_users": template_access_users(template["template_id"])})
     # The dashboard action is deliberately derived from node state, rather
     # than project open/closed state. Built-in Cloud and Ethernet switch nodes
     # are always reported as started by GNS3 and are not lab workloads.
@@ -1423,7 +1453,21 @@ async def create_lab_from_template(request: Request, template_id: str = Form(...
     allowed = has_admin_scope(request) or template["owner"] == user or user in template_access_users(template_id)
     if not allowed:
         raise HTTPException(404, "Lab template not found.")
-    return await queue_snapshot_import(request, str(template["source_project_id"]), str(template["snapshot_id"]), name)
+    archive_path = Path(str(template.get("archive_path") or ""))
+    try:
+        archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
+    except (OSError, ValueError):
+        return RedirectResponse("/?error=Template+archive+is+not+available", status_code=303)
+    new_name = name.strip()
+    if not new_name or len(new_name) > 80:
+        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
+    if any(job.get("status") in {"preparing", "importing"} for job in app.state.import_jobs.values()):
+        return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303)
+    job_id = str(uuid.uuid4())
+    app.state.import_jobs[job_id] = {"source_project_id":"", "snapshot_id":"", "template_path":str(archive_path), "template_id":template_id, "new_project_id":str(uuid.uuid4()), "new_name":new_name, "actor":user, "audit_actor":audit_actor(request), "status":"preparing", "progress_percent":0, "message":"Lab template queued for import…", "project_id":None}
+    asyncio.create_task(run_snapshot_import_job(app.state.import_jobs[job_id]))
+    audit(audit_actor(request), "create_lab_from_template", template_id, {"new_name": new_name})
+    return RedirectResponse(f"/?import_job={job_id}", status_code=303)
 
 
 @app.post("/retained-backup-imports")
@@ -1533,10 +1577,6 @@ async def restore_snapshot(request: Request, project_id: str, snapshot_id: str):
 async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
     user = current_user(request)
     require_project_access(request, project_id)
-    with sqlite3.connect(AUDIT_DB) as connection:
-        template_exists = connection.execute("SELECT 1 FROM lab_templates WHERE source_project_id=? AND snapshot_id=?", (project_id, snapshot_id)).fetchone()
-    if template_exists:
-        return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+published+as+a+lab+template+and+cannot+be+deleted", status_code=303)
     try:
         await ensure_project_open(project_id)
         await gns3("DELETE", f"/v2/projects/{project_id}/snapshots/{snapshot_id}")
@@ -1557,10 +1597,6 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
     project = await gns3("GET", f"/v2/projects/{project_id}")
     if confirmation.strip() != project.get("name"):
         return RedirectResponse(f"/projects/{project_id}?error=Lab+name+did+not+match", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
-        template_exists = connection.execute("SELECT 1 FROM lab_templates WHERE source_project_id=?", (project_id,)).fetchone()
-    if template_exists:
-        return RedirectResponse(f"/projects/{project_id}?error=This+lab+contains+published+templates.+Remove+template+access+and+unpublish+them+before+deleting+the+lab", status_code=303)
     retained = 0
     if retained_snapshot_ids:
         if not GNS3_PROJECTS_DIR:

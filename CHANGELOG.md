@@ -1,8 +1,16 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.0 is the current cumulative
+delivered as cumulative update packages; v8.5.1 is the current cumulative
 source release.
+
+## v8.5.1 — Independent template archive
+
+- Archive and verify a native snapshot under `LAB_TEMPLATE_DIR` when a template
+  is published.
+- Import templates from their archive, independent of the original lab.
+- Allow source labs and source backups to be deleted after template publication.
+- Remove the archived template copy when it is unpublished.
 
 ## v8.5.0 — Reusable lab templates and retained-backup quotas
 

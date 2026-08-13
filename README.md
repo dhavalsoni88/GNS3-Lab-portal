@@ -1,6 +1,6 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.5.0**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.5.1**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
 
 ## Local users, roles, and lab ownership
@@ -71,8 +71,10 @@ source lab.
 
 Current access grants are local-user assignments. The database also records a
 generic access subject type, so LDAP/Active Directory group assignments can be
-added later without redesigning templates. Published template backups and their
-source labs are protected from deletion to avoid breaking active templates.
+added later without redesigning templates. On publication, the portal copies
+and verifies the native snapshot under `LAB_TEMPLATE_DIR`. Templates therefore
+survive deletion of their source lab and source backup. Unpublishing a template
+removes its archived template copy.
 
 ## Retained backups on deletion
 
@@ -213,6 +215,7 @@ AUDIT_DB=./data/audit.db
 GNS3_PROJECTS_DIR=/home/gns3/GNS3/projects
 GNS3_SNAPSHOTS_DIR=/HDD_STORE/gns3-snapshots
 RETAINED_BACKUP_DIR=/HDD_STORE/my-lab-retained-backups
+LAB_TEMPLATE_DIR=/HDD_STORE/my-lab-templates
 
 PORTAL_LOG_DIR=/var/log/gns3-lab-portal
 PORTAL_LOG_RETENTION_DAYS=30
@@ -240,7 +243,8 @@ sudo install -d -o www-data -g www-data -m 0750 \
   /opt/gns3-lab-portal/data \
   /opt/gns3-lab-portal/data/uploads \
   /var/log/gns3-lab-portal \
-  /HDD_STORE/my-lab-retained-backups
+  /HDD_STORE/my-lab-retained-backups \
+  /HDD_STORE/my-lab-templates
 ```
 
 If your HDD is mounted somewhere else, replace `/HDD_STORE` consistently in
