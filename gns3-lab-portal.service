@@ -1,0 +1,17 @@
+[Unit]
+Description=GNS3 Lab Portal
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/gns3-lab-portal
+EnvironmentFile=/opt/gns3-lab-portal/.env
+ExecStart=/opt/gns3-lab-portal/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8088
+Restart=always
+RestartSec=3
+# Defensive ceiling. The portal itself uses a bounded HTTP connection pool.
+LimitNOFILE=8192
+
+[Install]
+WantedBy=multi-user.target
