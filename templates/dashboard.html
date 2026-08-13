@@ -3,7 +3,6 @@
 {% block content %}
 {% if request.query_params.get('error') %}<p class="error">{{ request.query_params.get('error').replace('+',' ') }}</p>{% endif %}
 {% if request.query_params.get('message') %}<p class="notice">{{ request.query_params.get('message').replace('+',' ') }}</p>{% endif %}
-{% if can_manage_users %}<p class="muted"><a class="link" href="/admin/users">Manage users and access</a></p>{% endif %}
 <section class="card create create-lab"><h2>Create Lab</h2><p class="muted">Choose how you want to start the new lab. Every restored or uploaded backup is imported as a separate, powered-off lab.</p>
   <div class="creation-options" role="radiogroup" aria-label="Create lab method">
     <label class="creation-option"><input type="radio" name="create-mode" value="blank" checked><span><strong>Build from scratch</strong><br><small>An empty Lab to create of your own.</small></span></label>

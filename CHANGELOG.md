@@ -1,8 +1,14 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.4.8 is the current cumulative
+delivered as cumulative update packages; v8.4.9 is the current cumulative
 source release.
+
+## v8.4.9 — Header navigation cleanup
+
+- Hide the signed-in username from the dashboard header.
+- Rename the Admin header link to **Manage Users**.
+- Remove the duplicate Manage users and access link from the dashboard.
 
 ## v8.4.8 — Profile, admin lab tabs, and share lookup
 
