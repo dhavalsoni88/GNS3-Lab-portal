@@ -1,6 +1,6 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.5.1**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.5.2**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
 
 ## Local users, roles, and lab ownership

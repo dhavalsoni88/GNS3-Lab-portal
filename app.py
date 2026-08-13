@@ -612,10 +612,12 @@ def snapshot_storage(project: dict[str, Any], snapshots: list[dict[str, Any]]) -
         return snapshots, 0, False
 
     try:
-        entries = {entry.name: entry for entry in snapshots_dir.iterdir()}
+        # Iterate the resolved directory so files behind the project snapshots
+        # symlink are scanned consistently on a dedicated HDD.
+        entries = {entry.name: entry for entry in resolved_snapshots_dir.iterdir()}
     except OSError:
         return snapshots, 0, True
-    total = directory_size(snapshots_dir)
+    total = directory_size(resolved_snapshots_dir)
     enriched: list[dict[str, Any]] = []
     for snapshot in snapshots:
         item = dict(snapshot)
@@ -645,12 +647,11 @@ def snapshot_storage(project: dict[str, Any], snapshots: list[dict[str, Any]]) -
 
 
 def format_backup_datetime(value: Any) -> str:
-    """Show an unambiguous UTC completion time without exposing raw metadata."""
+    """Return an ISO timestamp; the browser renders it in its local timezone."""
     if not value:
         return "—"
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
     except ValueError:
         return str(value)
 

@@ -1,8 +1,16 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.1 is the current cumulative
+delivered as cumulative update packages; v8.5.2 is the current cumulative
 source release.
+
+## v8.5.2 — Backup layout, size scan, and local time
+
+- Tighten the Lab Backup action layout and permit horizontal scrolling on small
+  displays rather than collapsing action controls.
+- Resolve dedicated-HDD snapshot directories before scanning their contents.
+- Render backup completion and audit timestamps in each user's browser-local
+  timezone instead of UTC.
 
 ## v8.5.1 — Independent template archive
 
