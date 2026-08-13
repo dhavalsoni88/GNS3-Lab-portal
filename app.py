@@ -1658,6 +1658,39 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
 
 
+@app.post("/projects/{project_id}/snapshots/delete")
+async def delete_selected_snapshots(request: Request, project_id: str, snapshot_ids: list[str] = Form(...)):
+    """Permanently remove selected completed backups after browser confirmation."""
+    require_project_access(request, project_id)
+    selected_ids = {snapshot_id for snapshot_id in snapshot_ids if snapshot_id}
+    if not selected_ids:
+        return RedirectResponse(f"/projects/{project_id}?error=Select+at+least+one+backup", status_code=303)
+    snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
+    selected = [item for item in snapshots if str(item.get("snapshot_id")) in selected_ids]
+    if len(selected) != len(selected_ids):
+        return RedirectResponse(f"/projects/{project_id}?error=One+or+more+selected+backups+were+not+found", status_code=303)
+    await ensure_project_open(project_id)
+    deleted: list[str] = []
+    failed = 0
+    for snapshot in selected:
+        snapshot_id = str(snapshot["snapshot_id"])
+        try:
+            await gns3("DELETE", f"/v2/projects/{project_id}/snapshots/{snapshot_id}")
+        except HTTPException:
+            failed += 1
+            portal_logger.warning("bulk_snapshot_delete_failed project_id=%s snapshot_id=%s", project_id, snapshot_id)
+            continue
+        with sqlite3.connect(AUDIT_DB) as connection:
+            connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=?", (project_id, snapshot_id))
+        deleted.append(snapshot_id)
+    if deleted:
+        audit(audit_actor(request), "delete_selected_snapshots", project_id, {"snapshot_ids": deleted, "failed": failed})
+    message = f"Deleted+{len(deleted)}+backup(s)"
+    if failed:
+        message += f";+{failed}+could+not+be+deleted"
+    return RedirectResponse(f"/projects/{project_id}?message={message}", status_code=303)
+
+
 @app.post("/projects/{project_id}/delete")
 async def delete_project(request: Request, project_id: str, confirmation: str = Form(...), retained_snapshot_ids: list[str] = Form([])):
     user = current_user(request)

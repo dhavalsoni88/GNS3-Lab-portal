@@ -1,8 +1,17 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.3 is the current cumulative
+delivered as cumulative update packages; v8.5.4 is the current cumulative
 source release.
+
+## v8.5.4 — Bulk backup actions
+
+- Rename the backup timestamp column to **Completed at**.
+- Keep Download, Restore, and Share as concise per-backup actions.
+- Move template publishing and backup deletion to the section toolbar.
+- Support selecting multiple backups for one confirmed bulk-delete operation.
+- Require exactly one selected backup to publish a template, pre-fill its name,
+  and allow the user to edit that name before publishing.
 
 ## v8.5.3 — Automatic HDD storage for new labs
 
