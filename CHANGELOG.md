@@ -4,6 +4,12 @@ All notable portal changes are documented here. Versions before v7.6 were
 delivered as cumulative update packages; v8.4.6 is the current cumulative
 source release.
 
+## v8.4.7 — Deployment documentation
+
+- Add a complete GitHub-to-Ubuntu installation guide.
+- Document same-server configuration, ACLs, systemd installation, verification,
+  updates, and snapshot-storage behavior.
+
 ## v8.4.6 — Collapsible audit trail
 
 - Rename **Recent activity** to **Audit trail**.

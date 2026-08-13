@@ -112,22 +112,187 @@ uses automatic binary units (MiB, GiB, or TiB) instead of always using MiB.
 
 A lightweight FastAPI portal for a GNS3 bare-metal controller. It creates, lists, renames, and exports labs; it also creates, restores, downloads, deletes, and clones native GNS3 snapshots. All controller requests are made by the portal backend; browsers never call port 3080 directly.
 
-## Install on Ubuntu
+## Install from GitHub on Ubuntu
+
+This guide installs the current portal source from this repository on an Ubuntu
+server. The simplest deployment is to run the portal on the **same server as
+the GNS3 controller**, which is the layout used in the examples below. It can
+also run on a separate Ubuntu server, but snapshot/download/import features
+then require secure read access to the GNS3 project and snapshot storage.
+
+### Before you begin
+
+- GNS3 Server must already be installed, running, and reachable from the
+  portal host.
+- Use a supported Ubuntu release with Python 3, systemd, and a user allowed to
+  run `sudo`.
+- Do not expose the GNS3 controller API on port `3080` to ordinary portal
+  users. The portal is the user-facing application.
+- The portal service runs as `www-data`; it needs write access to portal data
+  and logs, and read/traverse access to native GNS3 backups.
+
+### 1. Download the repository
+
+Run these commands on the Ubuntu server that will run the portal. For the
+current deployment, that can be the GNS3 server at `192.168.10.10`.
 
 ```bash
 sudo apt update
-sudo apt install -y python3-venv
-cd gns3-lab-portal
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+sudo apt install -y git python3 python3-venv python3-pip acl
+
+sudo git clone https://github.com/dhavalsoni88/GNS3-Lab-portal.git \
+  /opt/gns3-lab-portal
+
+cd /opt/gns3-lab-portal
 ```
 
-Edit `.env`: set the actual GNS3 API authentication and generate a random
-`PORTAL_SECRET_KEY` with `openssl rand -hex 32`. The portal starts without a
-login for the initial trusted-network stage. Set `PORTAL_AUTH_ENABLED=true`
-later to require the configured `PORTAL_USERNAME` and `PORTAL_PASSWORD`.
+If the destination already exists because this is an update, do not clone
+again. See [Update an existing installation](#update-an-existing-installation).
+
+### 2. Create the Python environment
+
+```bash
+cd /opt/gns3-lab-portal
+sudo python3 -m venv .venv
+sudo /opt/gns3-lab-portal/.venv/bin/pip install -r requirements.txt
+sudo cp .env.example .env
+sudo nano /opt/gns3-lab-portal/.env
+```
+
+### 3. Configure `.env`
+
+For a portal on the same host as GNS3, use the local controller address for
+backend API traffic and the LAN address for the browser's **Access Lab** links:
+
+```env
+GNS3_URL=http://127.0.0.1:3080
+GNS3_WEBUI_URL=http://192.168.10.10:3080
+GNS3_USERNAME=gns3
+GNS3_PASSWORD=replace-with-your-gns3-password
+
+PORTAL_AUTH_ENABLED=true
+PORTAL_USERNAME=portaladmin
+PORTAL_PASSWORD=choose-a-strong-initial-admin-password
+PORTAL_SECRET_KEY=replace-with-a-long-random-secret
+
+AUDIT_DB=./data/audit.db
+GNS3_PROJECTS_DIR=/home/gns3/GNS3/projects
+GNS3_SNAPSHOTS_DIR=/HDD_STORE/gns3-snapshots
+RETAINED_BACKUP_DIR=/HDD_STORE/my-lab-retained-backups
+
+PORTAL_LOG_DIR=/var/log/gns3-lab-portal
+PORTAL_LOG_RETENTION_DAYS=30
+PORTAL_LOG_LEVEL=INFO
+
+GNS3_TIMEOUT_SECONDS=14400
+SNAPSHOT_ESTIMATED_SECONDS=3600
+```
+
+Generate a suitable value for `PORTAL_SECRET_KEY` and paste it into `.env`:
+
+```bash
+openssl rand -hex 32
+```
+
+The configured `PORTAL_USERNAME` and `PORTAL_PASSWORD` create the initial
+Administrator only when the portal user database is first created. Afterwards,
+reset passwords through **Admin → Manage users and access**; changing the
+environment password does not change an existing account.
+
+### 4. Create portal data and log directories
+
+```bash
+sudo install -d -o www-data -g www-data -m 0750 \
+  /opt/gns3-lab-portal/data \
+  /opt/gns3-lab-portal/data/uploads \
+  /var/log/gns3-lab-portal \
+  /HDD_STORE/my-lab-retained-backups
+```
+
+If your HDD is mounted somewhere else, replace `/HDD_STORE` consistently in
+both `.env` and these commands. Verify the actual mount with `findmnt` before
+using it; do not use an unmounted directory as backup storage.
+
+### 5. Grant safe read access to GNS3 projects and snapshots
+
+The portal must read native snapshots to display their sizes, download them,
+or create a new lab from a backup. Keep files owned by `gns3`; grant the
+portal's `www-data` account only the access it needs:
+
+```bash
+sudo setfacl -m u:www-data:--x /home/gns3
+sudo setfacl -m u:www-data:rx /home/gns3/GNS3
+sudo setfacl -R -m u:www-data:rX /home/gns3/GNS3/projects
+
+sudo setfacl -m u:www-data:--x /HDD_STORE
+sudo setfacl -R -m u:www-data:rX /HDD_STORE/gns3-snapshots
+sudo find /HDD_STORE/gns3-snapshots -type d \
+  -exec setfacl -m d:u:www-data:rx {} +
+```
+
+To confirm that the portal service account can read snapshots:
+
+```bash
+sudo -u www-data find /HDD_STORE/gns3-snapshots \
+  -type f -name '*.gns3snapshot' -printf '%s  %p\n' | head
+```
+
+### 6. Install and start the portal service
+
+```bash
+sudo install -m 644 \
+  /opt/gns3-lab-portal/gns3-lab-portal.service \
+  /etc/systemd/system/gns3-lab-portal.service
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now gns3-lab-portal
+sudo systemctl status gns3-lab-portal --no-pager
+```
+
+The supplied service binds Uvicorn to `127.0.0.1:8088`. It is intended to sit
+behind an existing Nginx/Caddy reverse proxy, which publishes the portal URL
+such as `http://192.168.10.10`. If no reverse proxy exists yet, configure one
+before allowing users to access the portal. Use HTTPS and set
+`https_only=True` in `app.py` before publishing it outside a trusted network.
+
+### 7. Verify the installation
+
+```bash
+curl -I http://127.0.0.1:8088/login
+sudo journalctl -u gns3-lab-portal -n 100 --no-pager
+sudo tail -n 100 /var/log/gns3-lab-portal/portal.log
+```
+
+Sign in at the public portal address using the initial Administrator account,
+then immediately set a strong password in the Admin page and create ordinary
+user accounts as required.
+
+### Update an existing installation
+
+Before updating, take a backup of `.env` and `data/audit.db`. Do not replace
+`.env`: it contains deployment-specific passwords, paths, and settings.
+
+```bash
+sudo systemctl stop gns3-lab-portal
+sudo cp /opt/gns3-lab-portal/.env /opt/gns3-lab-portal/.env.backup
+sudo cp /opt/gns3-lab-portal/data/audit.db /opt/gns3-lab-portal/data/audit.db.backup
+
+sudo git -C /opt/gns3-lab-portal pull --ff-only
+sudo /opt/gns3-lab-portal/.venv/bin/pip install -r /opt/gns3-lab-portal/requirements.txt
+
+sudo install -m 644 \
+  /opt/gns3-lab-portal/gns3-lab-portal.service \
+  /etc/systemd/system/gns3-lab-portal.service
+sudo systemctl daemon-reload
+sudo systemctl start gns3-lab-portal
+```
+
+### Snapshot storage note
+
+The included migration script moves snapshots only for projects that already
+exist when it is run. After creating new projects, run the script again during
+a maintenance window to move those projects' `snapshots` directories to the
+HDD and recreate their symlinks. It never moves whole projects or node disks.
 
 To show native backup disk usage, set `GNS3_PROJECTS_DIR` to the absolute
 GNS3 projects root (the directory containing UUID-named project folders). The
