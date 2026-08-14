@@ -1,8 +1,16 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.8 is the current cumulative
+delivered as cumulative update packages; v8.5.9 is the current cumulative
 source release.
+
+## v8.5.9 — Administrator-approved templates
+
+- Let every lab owner submit a backup as a template.
+- Keep non-Administrator submissions pending and unavailable for import.
+- Add an Administrator approval queue; approval publishes a template to every
+  portal user.
+- Preserve existing templates as approved during the database upgrade.
 
 ## v8.5.8 — Server-side session security
 

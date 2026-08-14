@@ -203,7 +203,7 @@ def init_db() -> None:
             UNIQUE(source_project_id, snapshot_id)
         )""")
         template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
-        for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER")):
+        for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER"), ("approval_status", "TEXT NOT NULL DEFAULT 'approved'"), ("approved_by", "TEXT"), ("approved_at", "TEXT")):
             if name not in template_columns:
                 connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
         connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
@@ -361,7 +361,14 @@ def templates_for_user(username: str, include_owned: bool = False) -> list[dict[
         if include_owned:
             rows = connection.execute("SELECT * FROM lab_templates ORDER BY created_at DESC").fetchall()
         else:
-            rows = connection.execute("SELECT DISTINCT t.* FROM lab_templates t LEFT JOIN lab_template_access a ON a.template_id=t.template_id WHERE t.owner=? OR (a.subject_type='local_user' AND a.subject_id=?) ORDER BY t.created_at DESC", (username, username)).fetchall()
+            rows = connection.execute("SELECT DISTINCT t.* FROM lab_templates t LEFT JOIN lab_template_access a ON a.template_id=t.template_id WHERE t.owner=? OR (t.approval_status='approved' AND a.subject_type='local_user' AND a.subject_id=?) ORDER BY t.created_at DESC", (username, username)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def approved_templates() -> list[dict[str, Any]]:
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute("SELECT * FROM lab_templates WHERE approval_status='approved' ORDER BY created_at DESC").fetchall()
     return [dict(row) for row in rows]
 
 
@@ -1324,15 +1331,19 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
         if destination.stat().st_size != source.stat().st_size:
             raise OSError("Template archive size verification failed")
         with sqlite3.connect(AUDIT_DB) as connection:
-            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat()))
+            status_value = "approved" if has_admin_scope(request) else "pending"
+            approved_by = audit_actor(request) if status_value == "approved" else None
+            approved_at = datetime.now(timezone.utc).isoformat() if status_value == "approved" else None
+            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at,approval_status,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat(), status_value, approved_by, approved_at))
     except sqlite3.IntegrityError:
         shutil.rmtree(template_dir, ignore_errors=True)
         return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template", status_code=303)
     except OSError:
         shutil.rmtree(template_dir, ignore_errors=True)
         return RedirectResponse(f"/projects/{project_id}?error=The+template+archive+could+not+be+created", status_code=303)
-    audit(audit_actor(request), "create_lab_template", project_id, {"template_id": template_id, "snapshot_id": snapshot_id, "name": name})
-    return RedirectResponse(f"/projects/{project_id}?message=Lab+template+created", status_code=303)
+    audit(audit_actor(request), "create_lab_template", project_id, {"template_id": template_id, "snapshot_id": snapshot_id, "name": name, "approval_status": status_value})
+    message = "Lab+template+created" if status_value == "approved" else "Template+submitted+for+Administrator+approval"
+    return RedirectResponse(f"/projects/{project_id}?message={message}", status_code=303)
 
 
 @app.post("/templates/{template_id}/access")
@@ -1378,6 +1389,20 @@ async def unpublish_template(request: Request, template_id: str):
     return RedirectResponse("/?message=Lab+template+unpublished", status_code=303)
 
 
+@app.post("/templates/{template_id}/approve")
+async def approve_template(request: Request, template_id: str):
+    require_admin(request)
+    template = template_record(template_id)
+    if not template:
+        raise HTTPException(404, "Lab template not found.")
+    if template.get("approval_status") == "approved":
+        return RedirectResponse("/?message=Lab+template+is+already+approved", status_code=303)
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.execute("UPDATE lab_templates SET approval_status='approved',approved_by=?,approved_at=? WHERE template_id=?", (audit_actor(request), datetime.now(timezone.utc).isoformat(), template_id))
+    audit(audit_actor(request), "approve_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"], "owner": template["owner"]})
+    return RedirectResponse("/?message=Lab+template+approved+and+published", status_code=303)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     if AUTH_ENABLED and not active_portal_session(request):
@@ -1413,14 +1438,26 @@ async def dashboard(request: Request):
             if snapshot:
                 shared_backup_sources.append({"project_id": shared["project_id"], "snapshot_id": shared["snapshot_id"], "project_name": source_project.get("name", "Shared lab"), "snapshot_name": snapshot.get("name", "Unnamed backup")})
     available_templates: list[dict[str, Any]] = []
+    pending_templates: list[dict[str, Any]] = []
     if AUTH_ENABLED:
-        for template in templates_for_user(current_user(request), include_owned=has_admin_scope(request)):
+        templates_to_show = approved_templates()
+        pending_source = templates_for_user(current_user(request), include_owned=has_admin_scope(request))
+        for template in templates_to_show:
             archive_path = Path(str(template.get("archive_path") or ""))
             try:
                 archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
             except (OSError, ValueError):
                 continue
             available_templates.append({**template, "access_users": template_access_users(template["template_id"])})
+        for template in pending_source:
+            if template.get("approval_status") != "pending":
+                continue
+            archive_path = Path(str(template.get("archive_path") or ""))
+            try:
+                archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
+            except (OSError, ValueError):
+                continue
+            pending_templates.append(template)
     # The dashboard action is deliberately derived from node state, rather
     # than project open/closed state. Built-in Cloud and Ethernet switch nodes
     # are always reported as started by GNS3 and are not lab workloads.
@@ -1435,7 +1472,7 @@ async def dashboard(request: Request):
         project["can_share"] = can_manage_lab_sharing(request, project["project_id"])
         project["lab_group"] = "user" if has_admin_scope(request) and project["owner"] not in {current_user(request), "Unassigned"} else "mine"
     return templates.TemplateResponse(request, "dashboard.html", {
-        "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "available_templates": available_templates, "user": current_user(request),
+        "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "available_templates": available_templates, "pending_templates": pending_templates, "user": current_user(request),
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
         "portal_users": [account for account in list_users() if account.get("enabled")],
@@ -1671,10 +1708,7 @@ async def create_lab_from_shared_backup(request: Request, source_project_id: str
 async def create_lab_from_template(request: Request, template_id: str = Form(...), name: str = Form(...)):
     user = current_user(request)
     template = template_record(template_id)
-    if not template:
-        raise HTTPException(404, "Lab template not found.")
-    allowed = has_admin_scope(request) or template["owner"] == user or user in template_access_users(template_id)
-    if not allowed:
+    if not template or template.get("approval_status") != "approved":
         raise HTTPException(404, "Lab template not found.")
     archive_path = Path(str(template.get("archive_path") or ""))
     try:
