@@ -40,6 +40,8 @@ SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
 AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 AUDIT_DB = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
 UPLOAD_DIR = Path(os.getenv("PORTAL_UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
+USER_AVATAR_DIR = Path(os.getenv("PORTAL_AVATAR_DIR", str(BASE_DIR / "data" / "avatars"))).expanduser()
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
 RETAINED_BACKUP_DIR = Path(os.getenv("RETAINED_BACKUP_DIR", "/mnt/HDD_STORE/my-lab-retained-backups")).expanduser()
 LAB_TEMPLATE_DIR = Path(os.getenv("LAB_TEMPLATE_DIR", "/mnt/HDD_STORE/my-lab-templates")).expanduser()
 # Optional local root used to report native snapshot storage sizes. The GNS3
@@ -119,9 +121,33 @@ def safe_api_detail(value: Any, limit: int = 500) -> str:
     return text[:limit].replace("\n", " ")
 
 
+def avatar_format(data: bytes) -> tuple[str, str] | None:
+    """Accept only common raster-image signatures; SVG and arbitrary files are excluded."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg", "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png", "image/png"
+    if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp", "image/webp"
+    return None
+
+
+def safe_avatar_path(filename: str | None) -> Path | None:
+    """Resolve only a generated avatar file directly below the avatar directory."""
+    if not filename or Path(filename).name != filename:
+        return None
+    try:
+        path = (USER_AVATAR_DIR / filename).resolve(strict=True)
+        path.relative_to(USER_AVATAR_DIR.resolve(strict=True))
+    except (OSError, ValueError):
+        return None
+    return path if path.is_file() else None
+
+
 def init_db() -> None:
     AUDIT_DB.parent.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    USER_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     RETAINED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     LAB_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(AUDIT_DB) as connection:
@@ -135,7 +161,7 @@ def init_db() -> None:
             created_at TEXT NOT NULL
         )""")
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
-        for name in ("email", "first_name", "last_name", "retained_backup_limit"):
+        for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
             if name not in user_columns:
                 column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
                 connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
@@ -224,7 +250,7 @@ def password_matches(password: str, stored: str) -> bool:
 def user_record(username: str) -> dict[str, Any] | None:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
-        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name,retained_backup_limit FROM portal_users WHERE username=?", (username,)).fetchone()
+        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit FROM portal_users WHERE username=?", (username,)).fetchone()
     return dict(row) if row else None
 
 
@@ -237,10 +263,15 @@ def account_display_name(username: str) -> str:
     return name or str(account["username"])
 
 
+def account_has_avatar(username: str) -> bool:
+    account = user_record(username)
+    return bool(account and safe_avatar_path(str(account.get("avatar_filename") or "")))
+
+
 def list_users() -> list[dict[str, Any]]:
     with sqlite3.connect(AUDIT_DB) as connection:
         connection.row_factory = sqlite3.Row
-        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name,retained_backup_limit FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
+        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
     return [dict(row) for row in rows]
 
 
@@ -674,6 +705,7 @@ def format_backup_datetime(value: Any) -> str:
 
 templates.env.filters["backup_datetime"] = format_backup_datetime
 templates.env.filters["account_display_name"] = account_display_name
+templates.env.filters["account_has_avatar"] = account_has_avatar
 
 
 def local_snapshot_file(project: dict[str, Any], snapshot: dict[str, Any]) -> Path | None:
@@ -995,8 +1027,20 @@ async def profile_page(request: Request):
     })
 
 
+@app.get("/profile/avatar")
+async def profile_avatar(request: Request):
+    """Serve only the signed-in user's private, validated avatar image."""
+    username = signed_in_user(request)
+    account = user_record(username)
+    avatar_path = safe_avatar_path(str(account.get("avatar_filename") or "")) if account else None
+    if not avatar_path:
+        raise HTTPException(404, "Profile photo not found.")
+    media_types = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+    return FileResponse(avatar_path, media_type=media_types.get(avatar_path.suffix.lower(), "application/octet-stream"), headers={"Cache-Control": "private, no-store"})
+
+
 @app.post("/profile")
-async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), new_password: str = Form(""), confirm_new_password: str = Form("")):
+async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), new_password: str = Form(""), confirm_new_password: str = Form(""), avatar_file: UploadFile | None = File(None), remove_avatar: str = Form("")):
     if AUTH_ENABLED and not request.session.get("user"):
         return redirect_login()
     username = signed_in_user(request)
@@ -1015,12 +1059,37 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
             return RedirectResponse("/profile?error=New+passwords+do+not+match", status_code=303)
     elif confirm_new_password:
         return RedirectResponse("/profile?error=Enter+the+new+password+in+both+fields", status_code=303)
+    new_avatar_filename: str | None = None
+    if avatar_file and avatar_file.filename:
+        avatar_data = bytearray()
+        while chunk := await avatar_file.read(1024 * 1024):
+            avatar_data.extend(chunk)
+            if len(avatar_data) > MAX_AVATAR_BYTES:
+                await avatar_file.close()
+                return RedirectResponse("/profile?error=Profile+photo+must+be+2+MiB+or+smaller", status_code=303)
+        await avatar_file.close()
+        image_type = avatar_format(bytes(avatar_data))
+        if not image_type:
+            return RedirectResponse("/profile?error=Upload+a+JPG,+PNG,+or+WebP+profile+photo", status_code=303)
+        suffix, _ = image_type
+        new_avatar_filename = f"{uuid.uuid4().hex}{suffix}"
+        try:
+            (USER_AVATAR_DIR / new_avatar_filename).write_bytes(avatar_data)
+        except OSError:
+            portal_logger.exception("profile_avatar_write_failed username=%s", username)
+            return RedirectResponse("/profile?error=The+portal+could+not+save+the+profile+photo", status_code=303)
+    previous_avatar = str(account.get("avatar_filename") or "")
+    avatar_filename = new_avatar_filename or (None if remove_avatar == "remove" else previous_avatar or None)
     with sqlite3.connect(AUDIT_DB) as connection:
         if new_password:
-            connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, password_hash(new_password), username))
+            connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,avatar_filename=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, avatar_filename, password_hash(new_password), username))
         else:
-            connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=? WHERE username=?", (email or None, first_name or None, last_name or None, username))
-    audit(username, "update_profile", username, {"email_set": bool(email), "name_set": bool(first_name or last_name), "password_changed": bool(new_password)})
+            connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,avatar_filename=? WHERE username=?", (email or None, first_name or None, last_name or None, avatar_filename, username))
+    if previous_avatar and previous_avatar != avatar_filename:
+        old_path = safe_avatar_path(previous_avatar)
+        if old_path:
+            old_path.unlink(missing_ok=True)
+    audit(username, "update_profile", username, {"email_set": bool(email), "name_set": bool(first_name or last_name), "password_changed": bool(new_password), "avatar_changed": bool(new_avatar_filename or remove_avatar == "remove")})
     return RedirectResponse("/profile?message=Profile+updated", status_code=303)
 
 
