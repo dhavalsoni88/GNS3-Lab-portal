@@ -1,8 +1,15 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.7 is the current cumulative
+delivered as cumulative update packages; v8.5.8 is the current cumulative
 source release.
+
+## v8.5.8 — Server-side session security
+
+- Store only opaque, hashed session tokens in the portal database.
+- Expire sessions after 30 minutes idle or eight hours total by default.
+- Invalidate all existing sessions after a portal service restart.
+- Revoke sessions on logout and when the same user signs in again.
 
 ## v8.5.7 — Profile photos
 

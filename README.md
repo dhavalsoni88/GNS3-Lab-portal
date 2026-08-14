@@ -1,6 +1,6 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.5.7**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.5.8**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
 
 ## Local users, roles, and lab ownership
@@ -14,6 +14,13 @@ Passwords are stored as salted `scrypt` hashes in the portal SQLite database;
 they are never stored in plain text in the database. Keep a long random
 `PORTAL_SECRET_KEY` and use HTTPS before exposing the portal outside a trusted
 network.
+
+Portal login sessions are stored server-side. By default they expire after 30
+minutes without portal activity or after eight hours total, are revoked on
+logout and a new login for the same account, and are invalidated whenever the
+portal service restarts. Adjust `PORTAL_SESSION_IDLE_SECONDS` and
+`PORTAL_SESSION_MAX_SECONDS` in `.env` only if your security policy requires
+different values.
 
 Every authenticated user has **My Profile** in the portal header. Username is
 intentionally immutable because it identifies lab ownership. Users may add an

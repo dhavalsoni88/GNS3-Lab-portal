@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import shutil
 import sqlite3
 import uuid
@@ -38,6 +39,8 @@ PORTAL_USERNAME = os.getenv("PORTAL_USERNAME", "portaladmin")
 PORTAL_PASSWORD = os.getenv("PORTAL_PASSWORD", "change-this-now")
 SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
 AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+SESSION_IDLE_SECONDS = max(60, int(os.getenv("PORTAL_SESSION_IDLE_SECONDS", "1800")))
+SESSION_MAX_SECONDS = max(SESSION_IDLE_SECONDS, int(os.getenv("PORTAL_SESSION_MAX_SECONDS", "28800")))
 AUDIT_DB = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
 UPLOAD_DIR = Path(os.getenv("PORTAL_UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
 USER_AVATAR_DIR = Path(os.getenv("PORTAL_AVATAR_DIR", str(BASE_DIR / "data" / "avatars"))).expanduser()
@@ -160,6 +163,13 @@ def init_db() -> None:
             role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL
         )""")
+        connection.execute("""CREATE TABLE IF NOT EXISTS portal_sessions (
+            session_id_hash TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
+            issued_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+            server_epoch TEXT NOT NULL
+        )""")
+        connection.execute("CREATE INDEX IF NOT EXISTS portal_sessions_username ON portal_sessions(username)")
+        connection.execute("DELETE FROM portal_sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
         user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
         for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
             if name not in user_columns:
@@ -374,6 +384,9 @@ def template_record(template_id: str) -> dict[str, Any] | None:
 async def lifespan(app_instance: FastAPI):
     configure_logging()
     init_db()
+    # This in-memory value changes on every service start, invalidating every
+    # prior browser session even though the session cookie remains on a laptop.
+    app_instance.state.session_epoch = secrets.token_urlsafe(24)
     # Reuse a bounded pool for normal controller API calls.  Creating a new
     # AsyncClient for each dashboard request can briefly create hundreds of
     # sockets when several users refresh dashboards with many labs.
@@ -390,11 +403,72 @@ async def lifespan(app_instance: FastAPI):
 
 
 app = FastAPI(title="GNS3 Lab Portal", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False, same_site="lax")
+# The browser cookie contains only an opaque session token. Setting max_age to
+# None makes it a browser-session cookie; server-side expiry/revocation remains
+# the authoritative security control.
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False, same_site="lax", max_age=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 templates.env.globals["auth_enabled"] = AUTH_ENABLED
 templates.env.filters["storage_size"] = format_storage_size
+
+
+def session_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def revoke_portal_session(request: Request) -> None:
+    token = str(request.session.get("sid") or "")
+    if token:
+        with sqlite3.connect(AUDIT_DB) as connection:
+            connection.execute("DELETE FROM portal_sessions WHERE session_id_hash=?", (session_token_hash(token),))
+    request.session.clear()
+
+
+def active_portal_session(request: Request) -> dict[str, Any] | None:
+    token = str(request.session.get("sid") or "")
+    if not token:
+        return None
+    now = datetime.now(timezone.utc)
+    with sqlite3.connect(AUDIT_DB) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT username,issued_at,last_seen_at,expires_at,server_epoch FROM portal_sessions WHERE session_id_hash=?",
+            (session_token_hash(token),),
+        ).fetchone()
+        if not row:
+            request.session.clear()
+            return None
+        record = dict(row)
+        try:
+            issued_at = datetime.fromisoformat(str(record["issued_at"]).replace("Z", "+00:00"))
+            last_seen_at = datetime.fromisoformat(str(record["last_seen_at"]).replace("Z", "+00:00"))
+            expires_at = datetime.fromisoformat(str(record["expires_at"]).replace("Z", "+00:00"))
+            expired = now >= expires_at or (now - last_seen_at).total_seconds() >= SESSION_IDLE_SECONDS
+        except ValueError:
+            expired = True
+        if expired or record["server_epoch"] != request.app.state.session_epoch:
+            connection.execute("DELETE FROM portal_sessions WHERE session_id_hash=?", (session_token_hash(token),))
+            request.session.clear()
+            return None
+        connection.execute("UPDATE portal_sessions SET last_seen_at=? WHERE session_id_hash=?", (now.isoformat(), session_token_hash(token)))
+    return record
+
+
+def create_portal_session(request: Request, username: str) -> None:
+    now = datetime.now(timezone.utc)
+    token = secrets.token_urlsafe(32)
+    expires_at = now.timestamp() + SESSION_MAX_SECONDS
+    with sqlite3.connect(AUDIT_DB) as connection:
+        # One active session per user prevents a previously copied token from
+        # remaining valid after that user signs in again.
+        connection.execute("DELETE FROM portal_sessions WHERE username=?", (username,))
+        connection.execute(
+            "INSERT INTO portal_sessions(session_id_hash,username,issued_at,last_seen_at,expires_at,server_epoch) VALUES(?,?,?,?,?,?)",
+            (session_token_hash(token), username, now.isoformat(), now.isoformat(), datetime.fromtimestamp(expires_at, timezone.utc).isoformat(), request.app.state.session_epoch),
+        )
+    request.session.clear()
+    request.session["sid"] = token
 
 
 def current_user(request: Request) -> str:
@@ -402,7 +476,7 @@ def current_user(request: Request) -> str:
     if not AUTH_ENABLED:
         return "anonymous"
     signed_in_user(request)
-    user = request.session.get("impersonating") or request.session.get("user")
+    user = request.session.get("impersonating") or signed_in_user(request)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     return str(user)
@@ -411,12 +485,12 @@ def current_user(request: Request) -> str:
 def signed_in_user(request: Request) -> str:
     if not AUTH_ENABLED:
         return "anonymous"
-    user = request.session.get("user")
-    if not user:
+    session = active_portal_session(request)
+    if not session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    account = user_record(str(user))
+    account = user_record(str(session["username"]))
     if not account or not account.get("enabled"):
-        request.session.clear()
+        revoke_portal_session(request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     return str(account["username"])
 
@@ -996,8 +1070,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
     account = user_record(username.strip())
     if not account or not account.get("enabled") or not password_matches(password, str(account.get("password_hash", ""))):
         return templates.TemplateResponse(request, "login.html", {"error": "Invalid username or password.", "login_page": True}, status_code=401)
-    request.session["user"] = account["username"]
-    request.session.pop("impersonating", None)
+    create_portal_session(request, str(account["username"]))
     audit(str(account["username"]), "login", "portal", {"role": account["role"]})
     return RedirectResponse("/", status_code=303)
 
@@ -1006,15 +1079,16 @@ async def login(request: Request, username: str = Form(...), password: str = For
 async def logout(request: Request):
     if not AUTH_ENABLED:
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    user = request.session.get("user", "unknown")
-    request.session.clear()
+    session = active_portal_session(request)
+    user = str(session["username"]) if session else "unknown"
+    revoke_portal_session(request)
     audit(str(user), "logout", "portal")
     return redirect_login()
 
 
 @app.get("/profile", response_class=HTMLResponse)
 async def profile_page(request: Request):
-    if AUTH_ENABLED and not request.session.get("user"):
+    if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
     username = signed_in_user(request)
     account = user_record(username)
@@ -1041,7 +1115,7 @@ async def profile_avatar(request: Request):
 
 @app.post("/profile")
 async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), new_password: str = Form(""), confirm_new_password: str = Form(""), avatar_file: UploadFile | None = File(None), remove_avatar: str = Form("")):
-    if AUTH_ENABLED and not request.session.get("user"):
+    if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
     username = signed_in_user(request)
     account = user_record(username)
@@ -1306,7 +1380,7 @@ async def unpublish_template(request: Request, template_id: str):
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    if AUTH_ENABLED and not request.session.get("user"):
+    if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
     try:
         projects = await gns3("GET", "/v2/projects")
@@ -1423,7 +1497,7 @@ async def stop_lab(request: Request, project_id: str):
 
 @app.get("/projects/{project_id}", response_class=HTMLResponse)
 async def project_page(request: Request, project_id: str):
-    if AUTH_ENABLED and not request.session.get("user"):
+    if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
     try:
         require_project_access(request, project_id)
