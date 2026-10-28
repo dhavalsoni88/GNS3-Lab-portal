@@ -8,7 +8,6 @@ import logging
 import os
 import secrets
 import shutil
-import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -23,7 +22,14 @@ from fastapi import File, FastAPI, Form, HTTPException, Request, UploadFile, sta
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
+
+import portal_auth as auth
+import portal_db as db
 
 BASE_DIR = Path(__file__).resolve().parent
 GNS3_URL = os.getenv("GNS3_URL", "http://192.168.10.10:3080").rstrip("/")
@@ -38,10 +44,15 @@ GNS3_PASSWORD = os.getenv("GNS3_PASSWORD", "")
 PORTAL_USERNAME = os.getenv("PORTAL_USERNAME", "portaladmin")
 PORTAL_PASSWORD = os.getenv("PORTAL_PASSWORD", "change-this-now")
 SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
+# Public https:// address users and identity providers use to reach the portal.
+# Required for SAML: it forms the SP entity ID and the assertion consumer URL.
+PORTAL_PUBLIC_URL = os.getenv("PORTAL_PUBLIC_URL", "").strip().rstrip("/")
 AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_IDLE_SECONDS = max(60, int(os.getenv("PORTAL_SESSION_IDLE_SECONDS", "1800")))
 SESSION_MAX_SECONDS = max(SESSION_IDLE_SECONDS, int(os.getenv("PORTAL_SESSION_MAX_SECONDS", "28800")))
-AUDIT_DB = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
+PORTAL_DB_AUTO_MIGRATE = os.getenv("PORTAL_DB_AUTO_MIGRATE", "false").strip().lower() in {"1", "true", "yes", "on"}
+# Reverse proxies whose X-Forwarded-For header is trusted for audit source IPs.
+PORTAL_TRUSTED_PROXIES = frozenset(item.strip() for item in os.getenv("PORTAL_TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if item.strip())
 UPLOAD_DIR = Path(os.getenv("PORTAL_UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
 USER_AVATAR_DIR = Path(os.getenv("PORTAL_AVATAR_DIR", str(BASE_DIR / "data" / "avatars"))).expanduser()
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -70,6 +81,9 @@ PORTAL_LOG_RETENTION_DAYS = max(1, int(os.getenv("PORTAL_LOG_RETENTION_DAYS", "1
 PORTAL_LOG_LEVEL = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
 PORTAL_MONITOR_DISKS = tuple(name for name in (item.strip() for item in os.getenv("PORTAL_MONITOR_DISKS", "sda,sdb").split(",")) if name and name.replace("-", "").replace("_", "").isalnum())
 GNS3_MONITOR_COMPUTE_ID = os.getenv("GNS3_MONITOR_COMPUTE_ID", "").strip()
+# argon2-cffi defaults follow RFC 9106's second recommended (memory-constrained) profile.
+password_hasher = PasswordHasher()
+secret_box = auth.SecretBox(SECRET_KEY)
 portal_logger = logging.getLogger("gns3_lab_portal")
 api_logger = logging.getLogger("gns3_lab_portal.gns3_api")
 
@@ -175,69 +189,22 @@ def safe_avatar_path(filename: str | None) -> Path | None:
 
 
 def init_db() -> None:
-    AUDIT_DB.parent.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     USER_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     RETAINED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     LAB_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
-            action TEXT NOT NULL, target TEXT NOT NULL, details TEXT
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS portal_users (
-            username TEXT PRIMARY KEY COLLATE NOCASE, password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS portal_sessions (
-            session_id_hash TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
-            issued_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-            server_epoch TEXT NOT NULL
-        )""")
-        connection.execute("CREATE INDEX IF NOT EXISTS portal_sessions_username ON portal_sessions(username)")
+    if db.BACKEND == "mariadb":
+        # In production the application account has no DDL rights; the
+        # installer applies migrations with the separate migration account.
+        if PORTAL_DB_AUTO_MIGRATE:
+            db.apply_mariadb_migrations()
+        pending = db.pending_mariadb_migrations()
+        if pending:
+            raise RuntimeError(f"MariaDB schema migrations are pending: {', '.join(pending)}. Run: python3 portal_db.py migrate")
+    with db.connect() as connection:
+        if db.BACKEND == "sqlite":
+            init_sqlite_schema(connection)
         connection.execute("DELETE FROM portal_sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
-        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
-        for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
-            if name not in user_columns:
-                column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
-                connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
-            project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
-            assigned_at TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS retained_backups (
-            backup_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
-            source_project_id TEXT NOT NULL, source_lab_name TEXT NOT NULL,
-            backup_name TEXT NOT NULL, archive_path TEXT NOT NULL UNIQUE,
-            size_bytes INTEGER NOT NULL, retained_at TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_shares (
-            project_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
-            shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
-            PRIMARY KEY(project_id, username)
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS backup_shares (
-            project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
-            shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
-            PRIMARY KEY(project_id, snapshot_id, username)
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
-            template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
-            source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
-            name TEXT NOT NULL, description TEXT, archive_path TEXT, size_bytes INTEGER,
-            created_at TEXT NOT NULL,
-            UNIQUE(source_project_id, snapshot_id)
-        )""")
-        template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
-        for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER"), ("approval_status", "TEXT NOT NULL DEFAULT 'approved'"), ("approved_by", "TEXT"), ("approved_at", "TEXT")):
-            if name not in template_columns:
-                connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
-            template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
-            subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
-            granted_at TEXT NOT NULL, PRIMARY KEY(template_id, subject_type, subject_id)
-        )""")
         # Preserve the prior deployment path: the existing environment login
         # becomes the first local administrator on the first RBAC startup.
         existing = connection.execute("SELECT 1 FROM portal_users LIMIT 1").fetchone()
@@ -246,19 +213,101 @@ def init_db() -> None:
                 "INSERT INTO portal_users(username,password_hash,role,enabled,created_at) VALUES(?,?,?,?,?)",
                 (PORTAL_USERNAME, password_hash(PORTAL_PASSWORD), "admin", 1, datetime.now(timezone.utc).isoformat()),
             )
+    auth.seed_roles_from_legacy()
 
 
-def audit(actor: str, action: str, target: str, details: dict[str, Any] | None = None) -> None:
-    with sqlite3.connect(AUDIT_DB) as connection:
+def init_sqlite_schema(connection: db.Connection) -> None:
+    """Create or upgrade the SQLite schema. MariaDB uses database/mariadb/*.sql."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
+        action TEXT NOT NULL, target TEXT NOT NULL, details TEXT
+    )""")
+    audit_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_log)")}
+    for name, column_type in (("source_ip", "TEXT"), ("user_agent", "TEXT"), ("request_id", "TEXT"), ("outcome", "TEXT NOT NULL DEFAULT 'success'")):
+        if name not in audit_columns:
+            connection.execute(f"ALTER TABLE audit_log ADD COLUMN {name} {column_type}")
+    connection.execute("""CREATE TABLE IF NOT EXISTS portal_users (
+        username TEXT PRIMARY KEY COLLATE NOCASE, password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS portal_sessions (
+        session_id_hash TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
+        issued_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+        server_epoch TEXT NOT NULL
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS portal_sessions_username ON portal_sessions(username)")
+    user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
+    for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
+        if name not in user_columns:
+            column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
+            connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
+        project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
+        assigned_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS retained_backups (
+        backup_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
+        source_project_id TEXT NOT NULL, source_lab_name TEXT NOT NULL,
+        backup_name TEXT NOT NULL, archive_path TEXT NOT NULL UNIQUE,
+        size_bytes INTEGER NOT NULL, retained_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_shares (
+        project_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
+        shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, username)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS backup_shares (
+        project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
+        shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, snapshot_id, username)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
+        template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
+        source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
+        name TEXT NOT NULL, description TEXT, archive_path TEXT, size_bytes INTEGER,
+        created_at TEXT NOT NULL,
+        UNIQUE(source_project_id, snapshot_id)
+    )""")
+    template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
+    for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER"), ("approval_status", "TEXT NOT NULL DEFAULT 'approved'"), ("approved_by", "TEXT"), ("approved_at", "TEXT")):
+        if name not in template_columns:
+            connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
+    for name, column_type in (("auth_source", "TEXT NOT NULL DEFAULT 'local'"), ("auth_provider", "TEXT"), ("external_id", "TEXT"), ("last_login_at", "TEXT")):
+        if name not in {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}:
+            connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
+    connection.execute("""CREATE TABLE IF NOT EXISTS user_roles (
+        username TEXT NOT NULL COLLATE NOCASE, role_key TEXT NOT NULL, source TEXT NOT NULL,
+        assigned_at TEXT NOT NULL, PRIMARY KEY(username, role_key, source)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS identity_providers (
+        provider_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('ldap','saml')), name TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0, config TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS group_role_mappings (
+        provider_id TEXT NOT NULL, group_id TEXT NOT NULL COLLATE NOCASE, group_name TEXT NOT NULL,
+        role_key TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY(provider_id, group_id, role_key)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
+        template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
+        subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
+        granted_at TEXT NOT NULL, PRIMARY KEY(template_id, subject_type, subject_id)
+    )""")
+
+
+def audit(actor: str, action: str, target: str, details: dict[str, Any] | None = None, outcome: str = "success") -> None:
+    context = db.current_context()
+    with db.connect() as connection:
         connection.execute(
-            "INSERT INTO audit_log(timestamp, actor, action, target, details) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), actor, action, target, json.dumps(details or {})),
+            "INSERT INTO audit_log(timestamp, actor, action, target, details, source_ip, user_agent, request_id, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), actor[:255], action, target[:512], json.dumps(details or {}),
+             context.get("source_ip") or None, (context.get("user_agent") or "")[:512] or None, context.get("request_id") or None, outcome),
         )
 
 
 def recent_audit(limit: int = 20, username: str | None = None, include_all: bool = False) -> list[dict[str, str]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         if include_all or not username:
             rows = connection.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         else:
@@ -267,12 +316,25 @@ def recent_audit(limit: int = 20, username: str | None = None, include_all: bool
 
 
 def password_hash(password: str) -> str:
-    salt = os.urandom(16)
-    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
-    return "scrypt$" + base64.b64encode(salt).decode() + "$" + base64.b64encode(digest).decode()
+    return password_hasher.hash(password)
+
+
+def password_needs_rehash(stored: str) -> bool:
+    """v8.x scrypt hashes, and Argon2id hashes with old parameters, are upgraded at login."""
+    if not stored.startswith("$argon2id$"):
+        return True
+    try:
+        return password_hasher.check_needs_rehash(stored)
+    except InvalidHashError:
+        return True
 
 
 def password_matches(password: str, stored: str) -> bool:
+    if stored.startswith("$argon2"):
+        try:
+            return password_hasher.verify(stored, password)
+        except (VerificationError, InvalidHashError):
+            return False
     try:
         scheme, salt_b64, digest_b64 = stored.split("$", 2)
         if scheme != "scrypt":
@@ -285,9 +347,8 @@ def password_matches(password: str, stored: str) -> bool:
 
 
 def user_record(username: str) -> dict[str, Any] | None:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
-        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit FROM portal_users WHERE username=?", (username,)).fetchone()
+    with db.connect() as connection:
+        row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit,auth_source,auth_provider,external_id,last_login_at FROM portal_users WHERE username=?", (username,)).fetchone()
     return dict(row) if row else None
 
 
@@ -306,56 +367,59 @@ def account_has_avatar(username: str) -> bool:
 
 
 def list_users() -> list[dict[str, Any]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
-    return [dict(row) for row in rows]
-
-
-def enabled_admin_count() -> int:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        row = connection.execute("SELECT COUNT(*) FROM portal_users WHERE role='admin' AND enabled=1").fetchone()
-    return int(row[0])
+    with db.connect() as connection:
+        rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit,auth_source,auth_provider,last_login_at FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
+        role_rows = connection.execute("SELECT username, role_key, source FROM user_roles").fetchall()
+    roles: dict[str, list[dict[str, str]]] = {}
+    for row in role_rows:
+        roles.setdefault(str(row["username"]).lower(), []).append({"role_key": str(row["role_key"]), "source": str(row["source"])})
+    users = []
+    for row in rows:
+        account = dict(row)
+        assigned = roles.get(str(account["username"]).lower(), [])
+        account["direct_roles"] = sorted({item["role_key"] for item in assigned if item["source"] == "direct"}, key=auth.ROLE_ORDER.index)
+        account["group_roles"] = sorted({item["role_key"] for item in assigned if item["source"] != "direct"}, key=auth.ROLE_ORDER.index)
+        users.append(account)
+    return users
 
 
 def lab_owner(project_id: str) -> str | None:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         row = connection.execute("SELECT username FROM lab_owners WHERE project_id=?", (project_id,)).fetchone()
     return str(row[0]) if row else None
 
 
 def set_lab_owner(project_id: str, username: str) -> None:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO lab_owners(project_id,username,assigned_at) VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET username=excluded.username, assigned_at=excluded.assigned_at", (project_id, username, datetime.now(timezone.utc).isoformat()))
 
 
 def owned_project_ids(username: str) -> set[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT project_id FROM lab_owners WHERE username=?", (username,)).fetchall()
     return {str(row[0]) for row in rows}
 
 
 def shared_project_ids(username: str) -> set[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT project_id FROM lab_shares WHERE username=?", (username,)).fetchall()
     return {str(row[0]) for row in rows}
 
 
 def shared_users(project_id: str) -> list[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT username FROM lab_shares WHERE project_id=? ORDER BY username COLLATE NOCASE", (project_id,)).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def backup_shared_users(project_id: str, snapshot_id: str) -> list[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT username FROM backup_shares WHERE project_id=? AND snapshot_id=? ORDER BY username COLLATE NOCASE", (project_id, snapshot_id)).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def backup_shares_for(username: str) -> list[dict[str, str]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute("SELECT project_id,snapshot_id,shared_by,shared_at FROM backup_shares WHERE username=? ORDER BY shared_at DESC", (username,)).fetchall()
     return [dict(row) for row in rows]
 
@@ -365,8 +429,7 @@ def retained_backups_for(username: str | None = None) -> list[dict[str, Any]]:
     if username:
         query += " WHERE owner=?"; values = (username,)
     query += " ORDER BY retained_at DESC"
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute(query, values).fetchall()
     return [dict(row) for row in rows]
 
@@ -377,14 +440,13 @@ def retained_backup_limit(username: str) -> int:
 
 
 def retained_backup_count(username: str) -> int:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         row = connection.execute("SELECT COUNT(*) FROM retained_backups WHERE owner=?", (username,)).fetchone()
     return int(row[0])
 
 
 def templates_for_user(username: str, include_owned: bool = False) -> list[dict[str, Any]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         if include_owned:
             rows = connection.execute("SELECT * FROM lab_templates ORDER BY created_at DESC").fetchall()
         else:
@@ -393,21 +455,19 @@ def templates_for_user(username: str, include_owned: bool = False) -> list[dict[
 
 
 def approved_templates() -> list[dict[str, Any]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute("SELECT * FROM lab_templates WHERE approval_status='approved' ORDER BY created_at DESC").fetchall()
     return [dict(row) for row in rows]
 
 
 def template_access_users(template_id: str) -> list[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT subject_id FROM lab_template_access WHERE template_id=? AND subject_type='local_user' ORDER BY subject_id COLLATE NOCASE", (template_id,)).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def template_record(template_id: str) -> dict[str, Any] | None:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         row = connection.execute("SELECT * FROM lab_templates WHERE template_id=?", (template_id,)).fetchone()
     return dict(row) if row else None
 
@@ -424,13 +484,14 @@ async def lifespan(app_instance: FastAPI):
     # Reuse a bounded pool for normal controller API calls.  Creating a new
     # AsyncClient for each dashboard request can briefly create hundreds of
     # sockets when several users refresh dashboards with many labs.
-    auth = (GNS3_USERNAME, GNS3_PASSWORD) if GNS3_USERNAME else None
+    gns3_auth = (GNS3_USERNAME, GNS3_PASSWORD) if GNS3_USERNAME else None
     timeout = httpx.Timeout(GNS3_TIMEOUT_SECONDS, connect=10)
     limits = httpx.Limits(max_connections=40, max_keepalive_connections=12, keepalive_expiry=30)
-    app_instance.state.gns3_client = httpx.AsyncClient(timeout=timeout, auth=auth, limits=limits)
+    app_instance.state.gns3_client = httpx.AsyncClient(timeout=timeout, auth=gns3_auth, limits=limits)
     app_instance.state.backup_jobs = {}
     app_instance.state.import_jobs = {}
     app_instance.state.monitor_disk_samples = {}
+    app_instance.state.saml_requests = auth.SamlRequestStore()
     try:
         yield
     finally:
@@ -443,6 +504,34 @@ app = FastAPI(title="GNS3 Lab Portal", lifespan=lifespan)
 # the authoritative security control.
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False, same_site="lax", max_age=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+
+class AuditContextMiddleware:
+    """Record the client IP, user agent and a request ID for audit events."""
+
+    def __init__(self, app_instance: Any):
+        self.app = app_instance
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
+        client_ip = (scope.get("client") or ("", 0))[0] or ""
+        forwarded = headers.get("x-forwarded-for", "")
+        if forwarded and client_ip in PORTAL_TRUSTED_PROXIES:
+            client_ip = forwarded.split(",")[0].strip()
+        token = db.request_context.set({
+            "source_ip": client_ip[:45], "user_agent": headers.get("user-agent", "")[:512],
+            "request_id": uuid.uuid4().hex, "actor": "",
+        })
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            db.request_context.reset(token)
+
+
+app.add_middleware(AuditContextMiddleware)
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 templates.env.globals["auth_enabled"] = AUTH_ENABLED
 templates.env.filters["storage_size"] = format_storage_size
@@ -455,7 +544,7 @@ def session_token_hash(token: str) -> str:
 def revoke_portal_session(request: Request) -> None:
     token = str(request.session.get("sid") or "")
     if token:
-        with sqlite3.connect(AUDIT_DB) as connection:
+        with db.connect() as connection:
             connection.execute("DELETE FROM portal_sessions WHERE session_id_hash=?", (session_token_hash(token),))
     request.session.clear()
 
@@ -465,8 +554,7 @@ def active_portal_session(request: Request) -> dict[str, Any] | None:
     if not token:
         return None
     now = datetime.now(timezone.utc)
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         row = connection.execute(
             "SELECT username,issued_at,last_seen_at,expires_at,server_epoch FROM portal_sessions WHERE session_id_hash=?",
             (session_token_hash(token),),
@@ -494,7 +582,7 @@ def create_portal_session(request: Request, username: str) -> None:
     now = datetime.now(timezone.utc)
     token = secrets.token_urlsafe(32)
     expires_at = now.timestamp() + SESSION_MAX_SECONDS
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         # One active session per user prevents a previously copied token from
         # remaining valid after that user signs in again.
         connection.execute("DELETE FROM portal_sessions WHERE username=?", (username,))
@@ -527,24 +615,54 @@ def signed_in_user(request: Request) -> str:
     if not account or not account.get("enabled"):
         revoke_portal_session(request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    impersonating = request.session.get("impersonating")
+    db.current_context()["actor"] = f"{account['username']} impersonating {impersonating}" if impersonating else str(account["username"])
     return str(account["username"])
 
 
-def is_admin(request: Request) -> bool:
+def has_permission(request: Request, permission: str) -> bool:
+    """Permission of the effective user (the impersonated user while viewing as someone)."""
     if not AUTH_ENABLED:
         return True
-    record = user_record(signed_in_user(request))
-    return bool(record and record.get("role") == "admin")
+    return permission in auth.user_permissions(current_user(request))
+
+
+def admin_permission(request: Request, permission: str) -> bool:
+    """Permission of the signed-in user for portal-wide actions; never while impersonating."""
+    if not AUTH_ENABLED:
+        return True
+    if request.session.get("impersonating"):
+        return False
+    return permission in auth.user_permissions(signed_in_user(request))
+
+
+def require_permission(request: Request, permission: str, portal_wide: bool = False) -> None:
+    allowed = admin_permission(request, permission) if portal_wide else has_permission(request, permission)
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Your role does not allow this ({auth.PERMISSIONS.get(permission, permission)}).")
+
+
+def is_admin(request: Request) -> bool:
+    """True for a signed-in user who may manage users, even while viewing as another user."""
+    if not AUTH_ENABLED:
+        return True
+    return "users.manage" in auth.user_permissions(signed_in_user(request))
 
 
 def can_manage_users(request: Request) -> bool:
-    """UI permission: only a signed-in Admin outside impersonation mode."""
-    return bool(AUTH_ENABLED and not request.session.get("impersonating") and is_admin(request))
+    """UI permission: user administration, outside impersonation mode."""
+    return bool(AUTH_ENABLED and admin_permission(request, "users.manage"))
 
 
 def has_admin_scope(request: Request) -> bool:
-    """Actual Admin permissions, unless deliberately operating as another user."""
-    return bool(is_admin(request) and not request.session.get("impersonating"))
+    """See and manage every lab, unless deliberately operating as another user."""
+    return admin_permission(request, "labs.all")
+
+
+def require_lab_owner(request: Request, project_id: str) -> None:
+    """Destructive lab actions: the owner, or someone who manages every lab."""
+    if AUTH_ENABLED and not has_admin_scope(request) and lab_owner(project_id) != current_user(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the lab owner or a Lab Manager can do this.")
 
 
 def can_manage_lab_sharing(request: Request, project_id: str) -> bool:
@@ -559,7 +677,7 @@ def audit_actor(request: Request) -> str:
 
 def require_admin(request: Request) -> None:
     if not is_admin(request):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access is required.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Platform Admin access is required.")
 
 
 def require_project_access(request: Request, project_id: str) -> None:
@@ -807,14 +925,22 @@ def format_backup_datetime(value: Any) -> str:
     if not value:
         return "—"
     try:
+        # GNS3 v2 reports snapshot created_at as Unix epoch seconds.
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return str(value)
 
 
 templates.env.filters["backup_datetime"] = format_backup_datetime
 templates.env.filters["account_display_name"] = account_display_name
 templates.env.filters["account_has_avatar"] = account_has_avatar
+templates.env.filters["role_name"] = auth.role_name
+templates.env.globals["can"] = has_permission
+templates.env.globals["admin_can"] = admin_permission
+templates.env.globals["ROLES"] = auth.ROLES
+templates.env.globals["PERMISSIONS"] = auth.PERMISSIONS
 
 
 def local_snapshot_file(project: dict[str, Any], snapshot: dict[str, Any]) -> Path | None:
@@ -901,9 +1027,9 @@ def ensure_hdd_snapshot_link(project: dict[str, Any]) -> tuple[bool, str]:
 
 async def stream_project_export(project_id: str):
     """Relay a controller project export without buffering it in portal memory."""
-    auth = (GNS3_USERNAME, GNS3_PASSWORD) if GNS3_USERNAME else None
+    gns3_auth = (GNS3_USERNAME, GNS3_PASSWORD) if GNS3_USERNAME else None
     timeout = httpx.Timeout(GNS3_TIMEOUT_SECONDS, connect=10)
-    async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
+    async with httpx.AsyncClient(timeout=timeout, auth=gns3_auth) as client:
         async with client.stream("GET", f"{GNS3_URL}/v2/projects/{project_id}/export") as response:
             if response.status_code >= 400:
                 detail = (await response.aread()).decode(errors="replace")
@@ -928,7 +1054,7 @@ async def import_snapshot_as_new_project(job: dict[str, Any], snapshot_path: Pat
                 )
                 yield chunk
 
-    auth = (GNS3_USERNAME, GNS3_PASSWORD) if GNS3_USERNAME else None
+    gns3_auth = (GNS3_USERNAME, GNS3_PASSWORD) if GNS3_USERNAME else None
     timeout = httpx.Timeout(GNS3_TIMEOUT_SECONDS, connect=10)
     params = {
         "name": str(job["new_name"]),
@@ -937,7 +1063,7 @@ async def import_snapshot_as_new_project(job: dict[str, Any], snapshot_path: Pat
         "auto_close": "true",
     }
     try:
-        async with httpx.AsyncClient(timeout=timeout, auth=auth) as client:
+        async with httpx.AsyncClient(timeout=timeout, auth=gns3_auth) as client:
             response = await client.post(
                 f"{GNS3_URL}/v2/projects/{job['new_project_id']}/import",
                 params=params,
@@ -999,7 +1125,7 @@ async def run_snapshot_import_job(job: dict[str, Any]) -> None:
         # the new project is created successfully; a failed import remains
         # retryable and does not remove the share.
         if source_project_id and snapshot_id and job.get("consume_backup_share"):
-            with sqlite3.connect(AUDIT_DB) as connection:
+            with db.connect() as connection:
                 connection.execute(
                     "DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=? AND username=?",
                     (source_project_id, snapshot_id, str(job["actor"])),
@@ -1088,26 +1214,194 @@ async def run_backup_job(job: dict[str, Any]) -> None:
 
 
 def error_page(request: Request, exc: HTTPException) -> HTMLResponse:
-    return templates.TemplateResponse(request, "error.html", {"message": str(exc.detail), "status": exc.status_code}, status_code=exc.status_code)
+    context: dict[str, Any] = {"message": str(exc.detail), "status": exc.status_code}
+    try:
+        context.update(base_context(request))
+    except HTTPException:
+        pass  # Not signed in: show the error without account details.
+    return templates.TemplateResponse(request, "error.html", context, status_code=exc.status_code)
+
+
+def login_context(error: str | None = None) -> dict[str, Any]:
+    return {
+        "error": error, "login_page": True,
+        "saml_providers": auth.list_providers("saml", enabled_only=True) if PORTAL_PUBLIC_URL else [],
+        "ldap_enabled": bool(auth.list_providers("ldap", enabled_only=True)),
+    }
+
+
+def login_failed(request: Request, login_name: str, reason: str, message: str = "Invalid username or password.", **details: Any) -> HTMLResponse:
+    audit(login_name[:255] or "(blank)", "login_failed", "portal", {"reason": reason, **details}, outcome="failure")
+    return templates.TemplateResponse(request, "login.html", login_context(message), status_code=401)
+
+
+def provision_external_user(provider: dict[str, Any], identity: auth.ExternalIdentity) -> tuple[dict[str, Any] | None, str]:
+    """Create or refresh a directory/SSO user and its group roles. Returns (account, failure reason)."""
+    account = user_record(identity.username)
+    if account and (account.get("auth_source") != provider["kind"] or account.get("auth_provider") != provider["provider_id"]):
+        # Never let an external identity take over a local account or another provider's account.
+        return None, "username_conflict"
+    group_roles = auth.roles_for_groups(provider, identity.groups)
+    direct_roles = {key for key, sources in auth.user_roles(identity.username).items() if "direct" in sources} if account else set()
+    if not group_roles and not direct_roles:
+        if account:
+            auth.set_group_roles(account["username"], provider["provider_id"], set())  # drop stale group roles
+        return None, "no_role"
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect() as connection:
+        if not account:
+            connection.execute(
+                "INSERT INTO portal_users(username,password_hash,role,enabled,created_at,email,first_name,last_name,auth_source,auth_provider,external_id,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (identity.username, auth.EXTERNAL_PASSWORD_MARKER, "user", 1, now, identity.email or None, identity.first_name or None, identity.last_name or None, provider["kind"], provider["provider_id"], identity.external_id, now),
+            )
+        else:
+            if not account.get("enabled"):
+                return None, "disabled"
+            connection.execute(
+                "UPDATE portal_users SET email=COALESCE(?,email), first_name=COALESCE(?,first_name), last_name=COALESCE(?,last_name), external_id=?, last_login_at=? WHERE username=?",
+                (identity.email or None, identity.first_name or None, identity.last_name or None, identity.external_id, now, account["username"]),
+            )
+    username = account["username"] if account else identity.username
+    auth.set_group_roles(username, provider["provider_id"], group_roles)
+    if not account:
+        audit(username, "create_external_user", username, {"provider": provider["provider_id"], "auth_source": provider["kind"], "roles": sorted(group_roles)})
+    return user_record(username), ""
+
+
+def complete_login(request: Request, account: dict[str, Any], method: str, provider_id: str = "") -> RedirectResponse:
+    db.current_context()["actor"] = str(account["username"])
+    with db.connect() as connection:
+        connection.execute("UPDATE portal_users SET last_login_at=? WHERE username=?", (datetime.now(timezone.utc).isoformat(), account["username"]))
+    create_portal_session(request, str(account["username"]))
+    roles = sorted(auth.user_roles(str(account["username"])))
+    audit(str(account["username"]), "login", "portal", {"method": method, "provider": provider_id or None, "roles": roles})
+    return RedirectResponse("/", status_code=303)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException):
+    """Browsers get the portal's error page (or the sign-in page); scripts get JSON."""
+    if "text/html" not in request.headers.get("accept", ""):
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=getattr(exc, "headers", None))
+    if exc.status_code == status.HTTP_401_UNAUTHORIZED and AUTH_ENABLED:
+        return redirect_login()
+    return error_page(request, HTTPException(exc.status_code, str(exc.detail)))
 
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
     if not AUTH_ENABLED:
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    return templates.TemplateResponse(request, "login.html", {"error": None, "login_page": True})
+    return templates.TemplateResponse(request, "login.html", login_context(request.query_params.get("error")))
 
 
 @app.post("/login")
 async def login(request: Request, username: str = Form(...), password: str = Form(...)):
     if not AUTH_ENABLED:
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    account = user_record(username.strip())
-    if not account or not account.get("enabled") or not password_matches(password, str(account.get("password_hash", ""))):
-        return templates.TemplateResponse(request, "login.html", {"error": "Invalid username or password.", "login_page": True}, status_code=401)
-    create_portal_session(request, str(account["username"]))
-    audit(str(account["username"]), "login", "portal", {"role": account["role"]})
-    return RedirectResponse("/", status_code=303)
+    login_name = username.strip()
+    account = user_record(login_name) or user_record(auth.normalise_login_name(login_name))
+    if account and account.get("auth_source", "local") == "local":
+        if not account.get("enabled"):
+            return login_failed(request, login_name, "disabled")
+        if not password_matches(password, str(account.get("password_hash", ""))):
+            return login_failed(request, login_name, "bad_password")
+        if password_needs_rehash(str(account["password_hash"])):
+            db.current_context()["actor"] = str(account["username"])
+            with db.connect() as connection:
+                connection.execute("UPDATE portal_users SET password_hash=? WHERE username=?", (password_hash(password), account["username"]))
+            audit(str(account["username"]), "password_rehashed", str(account["username"]), {"scheme": "argon2id"})
+        return complete_login(request, account, "local")
+    if account and account.get("auth_source") == "saml":
+        return login_failed(request, login_name, "sso_account", "This account signs in with single sign-on. Use the sign-in button for your organisation.")
+    providers = auth.list_providers("ldap", enabled_only=True)
+    if account and account.get("auth_source") == "ldap":
+        providers = [item for item in providers if item["provider_id"] == account.get("auth_provider")]
+    for provider in providers:
+        directory = auth.LdapDirectory(provider, secret_box)
+        try:
+            identity = await asyncio.to_thread(directory.authenticate, login_name, password)
+        except auth.IdentityError as exc:
+            portal_logger.error("ldap_login_error provider=%s error=%s", provider["provider_id"], exc)
+            audit(login_name[:255], "login_failed", "portal", {"reason": "directory_unavailable", "provider": provider["provider_id"]}, outcome="error")
+            continue
+        if identity is None:
+            continue
+        account, reason = provision_external_user(provider, identity)
+        if not account:
+            message = "Your directory account has no portal role. Ask an administrator to map one of your groups." if reason == "no_role" else "Invalid username or password."
+            return login_failed(request, login_name, reason, message, provider=provider["provider_id"])
+        return complete_login(request, account, "ldap", provider["provider_id"])
+    return login_failed(request, login_name, "unknown_user" if not account else "bad_password")
+
+
+def saml_auth_for(request: Request, provider: dict[str, Any], post_data: dict[str, str] | None = None) -> Any:
+    from onelogin.saml2.auth import OneLogin_Saml2_Auth
+    request_data = auth.saml_request_data(PORTAL_PUBLIC_URL, request.url.path, dict(request.query_params), post_data or {})
+    return OneLogin_Saml2_Auth(request_data, auth.saml_settings(provider, PORTAL_PUBLIC_URL))
+
+
+def enabled_saml_provider(provider_id: str) -> dict[str, Any]:
+    provider = auth.get_provider(provider_id)
+    if not provider or provider["kind"] != "saml" or not provider["enabled"] or not PORTAL_PUBLIC_URL:
+        raise HTTPException(404, "Single sign-on provider not found.")
+    return provider
+
+
+@app.get("/auth/saml/{provider_id}/login")
+async def saml_login(request: Request, provider_id: str):
+    if not AUTH_ENABLED:
+        return RedirectResponse("/", status_code=303)
+    provider = enabled_saml_provider(provider_id)
+    saml = saml_auth_for(request, provider)
+    relay = auth.SamlRequestStore.new_relay_token()
+    url = saml.login(return_to=relay)
+    app.state.saml_requests.put(relay, provider_id, saml.get_last_request_id())
+    return RedirectResponse(url, status_code=303)
+
+
+@app.post("/auth/saml/{provider_id}/acs")
+async def saml_acs(request: Request, provider_id: str):
+    if not AUTH_ENABLED:
+        return RedirectResponse("/", status_code=303)
+    provider = enabled_saml_provider(provider_id)
+    form = {key: str(value) for key, value in (await request.form()).items()}
+    pending = app.state.saml_requests.take(form.get("RelayState", ""))
+    if not pending or pending[0] != provider_id:
+        # Only sign-ins started from this portal are accepted (no IdP-initiated SSO),
+        # which lets every response be bound to its request ID.
+        return login_failed(request, "(saml)", "saml_unsolicited", "That sign-in has expired. Start again from the portal sign-in page.", provider=provider_id)
+    saml = saml_auth_for(request, provider, form)
+    try:
+        saml.process_response(request_id=pending[1])
+    except Exception as exc:  # malformed XML and similar
+        portal_logger.warning("saml_response_rejected provider=%s error=%s", provider_id, type(exc).__name__)
+        return login_failed(request, "(saml)", "saml_invalid", "Single sign-on failed. Try again or contact an administrator.", provider=provider_id)
+    if saml.get_errors() or not saml.is_authenticated():
+        portal_logger.warning("saml_response_rejected provider=%s errors=%s reason=%s", provider_id, saml.get_errors(), saml.get_last_error_reason())
+        return login_failed(request, "(saml)", "saml_invalid", "Single sign-on failed. Try again or contact an administrator.", provider=provider_id, errors=saml.get_errors())
+    if not app.state.saml_requests.mark_assertion_used(saml.get_last_assertion_id() or ""):
+        return login_failed(request, "(saml)", "saml_replay", "That sign-in response was already used.", provider=provider_id)
+    try:
+        identity = auth.saml_identity(provider, saml.get_nameid() or "", saml.get_attributes())
+    except auth.IdentityError as exc:
+        return login_failed(request, "(saml)", "saml_no_username", str(exc), provider=provider_id)
+    account, reason = provision_external_user(provider, identity)
+    if not account:
+        message = "Your account has no portal role. Ask an administrator to map one of your groups." if reason == "no_role" else "Single sign-on failed for this account."
+        return login_failed(request, identity.username, reason, message, provider=provider_id)
+    return complete_login(request, account, "saml", provider_id)
+
+
+@app.get("/auth/saml/{provider_id}/metadata")
+async def saml_metadata(request: Request, provider_id: str):
+    provider = auth.get_provider(provider_id)
+    if not provider or provider["kind"] != "saml" or not PORTAL_PUBLIC_URL:
+        raise HTTPException(404, "Single sign-on provider not found.")
+    from onelogin.saml2.settings import OneLogin_Saml2_Settings
+    settings = OneLogin_Saml2_Settings(auth.saml_settings(provider, PORTAL_PUBLIC_URL), sp_validation_only=True)
+    metadata = settings.get_sp_metadata()
+    return HTMLResponse(metadata, media_type="application/samlmetadata+xml")
 
 
 @app.post("/logout")
@@ -1189,7 +1483,7 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
             return RedirectResponse("/profile?error=The+portal+could+not+save+the+profile+photo", status_code=303)
     previous_avatar = str(account.get("avatar_filename") or "")
     avatar_filename = new_avatar_filename or (None if remove_avatar == "remove" else previous_avatar or None)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         if new_password:
             connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,avatar_filename=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, avatar_filename, password_hash(new_password), username))
         else:
@@ -1204,50 +1498,219 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
 
 @app.get("/admin/users", response_class=HTMLResponse)
 async def admin_users(request: Request):
-    require_admin(request)
+    require_permission(request, "users.manage", portal_wide=True)
     return templates.TemplateResponse(request, "admin_users.html", {
         "users": list_users(), "user": current_user(request), "signed_in_user": signed_in_user(request),
-        "is_admin": True, "can_manage_users": True, "impersonating": request.session.get("impersonating", ""),
+        "is_admin": True, "can_manage_users": True, "providers": {item["provider_id"]: item for item in auth.list_providers()}, "impersonating": request.session.get("impersonating", ""),
+        "active_nav": "users", "has_admin_scope": has_admin_scope(request),
     })
 
 
+def valid_role_keys(values: list[str]) -> set[str]:
+    return {value for value in (item.strip() for item in values) if value in auth.ROLES}
+
+
 @app.post("/admin/users")
-async def admin_create_user(request: Request, username: str = Form(...), password: str = Form(...), role: str = Form("user")):
-    require_admin(request)
-    username, role = username.strip(), role.strip().lower()
-    if not username or len(username) > 80 or any(char.isspace() for char in username) or role not in {"admin", "user"} or len(password) < 12:
-        return RedirectResponse("/admin/users?error=Use+a+username+without+spaces%2C+a+valid+role%2C+and+a+password+of+at+least+12+characters", status_code=303)
+async def admin_create_user(request: Request, username: str = Form(...), password: str = Form(...), roles: list[str] = Form([]), role: str = Form("")):
+    require_permission(request, "users.manage", portal_wide=True)
+    username = username.strip()
+    # "role" is the v8.x single admin/user field, still accepted from scripts.
+    chosen = valid_role_keys(roles) or ({auth.LEGACY_ROLE_MAP[role]} if role in auth.LEGACY_ROLE_MAP else {"lab_editor"})
+    if not username or len(username) > 80 or any(char.isspace() or char in "\\/" for char in username) or len(password) < 12:
+        return RedirectResponse("/admin/users?error=Use+a+username+without+spaces+or+slashes+and+a+password+of+at+least+12+characters", status_code=303)
     try:
-        with sqlite3.connect(AUDIT_DB) as connection:
-            connection.execute("INSERT INTO portal_users(username,password_hash,role,enabled,created_at) VALUES(?,?,?,?,?)", (username, password_hash(password), role, 1, datetime.now(timezone.utc).isoformat()))
-    except sqlite3.IntegrityError:
+        with db.connect() as connection:
+            connection.execute("INSERT INTO portal_users(username,password_hash,role,enabled,created_at,auth_source) VALUES(?,?,?,?,?,?)", (username, password_hash(password), "user", 1, datetime.now(timezone.utc).isoformat(), "local"))
+    except db.IntegrityError:
         return RedirectResponse("/admin/users?error=That+username+already+exists", status_code=303)
-    audit(audit_actor(request), "create_user", username, {"role": role})
+    auth.set_direct_roles(username, chosen)
+    audit(audit_actor(request), "create_user", username, {"roles": sorted(chosen), "auth_source": "local"})
     return RedirectResponse("/admin/users?message=User+created", status_code=303)
 
 
 @app.post("/admin/users/{username}/update")
-async def admin_update_user(request: Request, username: str, role: str = Form(...), enabled: str = Form("0"), password: str = Form(""), retained_backup_limit: int = Form(2)):
-    require_admin(request)
+async def admin_update_user(request: Request, username: str, roles: list[str] = Form([]), role: str = Form(""), enabled: str = Form("0"), password: str = Form(""), retained_backup_limit: int = Form(2)):
+    require_permission(request, "users.manage", portal_wide=True)
     target = user_record(username)
-    role = role.strip().lower()
-    if not target or role not in {"admin", "user"}:
+    if not target:
         raise HTTPException(404, "User not found.")
+    chosen = valid_role_keys(roles) or ({auth.LEGACY_ROLE_MAP[role]} if role in auth.LEGACY_ROLE_MAP else set())
+    is_enabled = enabled == "1"
     if retained_backup_limit < 0 or retained_backup_limit > 100:
         return RedirectResponse("/admin/users?error=Retained+backup+limit+must+be+between+0+and+100", status_code=303)
-    if target["username"].lower() == signed_in_user(request).lower() and enabled != "1":
+    if target["username"].lower() == signed_in_user(request).lower() and not is_enabled:
         return RedirectResponse("/admin/users?error=You+cannot+disable+your+own+account", status_code=303)
-    if target.get("role") == "admin" and target.get("enabled") and (role != "admin" or enabled != "1") and enabled_admin_count() <= 1:
-        return RedirectResponse("/admin/users?error=At+least+one+enabled+Administrator+must+remain", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    keeps_break_glass = target.get("auth_source") == "local" and is_enabled and "platform_admin" in chosen
+    if not keeps_break_glass and "platform_admin" in auth.user_roles(target["username"]) and target.get("auth_source") == "local" and auth.enabled_local_admin_count(excluding=target["username"]) == 0:
+        return RedirectResponse("/admin/users?error=At+least+one+enabled+local+Platform+Admin+must+remain+for+break-glass+access", status_code=303)
+    if password and target.get("auth_source") != "local":
+        return RedirectResponse("/admin/users?error=Directory+and+SSO+users+change+their+password+with+their+identity+provider", status_code=303)
+    if password and len(password) < 12:
+        return RedirectResponse("/admin/users?error=Passwords+must+be+at+least+12+characters", status_code=303)
+    with db.connect() as connection:
         if password:
-            if len(password) < 12:
-                return RedirectResponse("/admin/users?error=Passwords+must+be+at+least+12+characters", status_code=303)
-            connection.execute("UPDATE portal_users SET role=?,enabled=?,password_hash=?,retained_backup_limit=? WHERE username=?", (role, 1 if enabled == "1" else 0, password_hash(password), retained_backup_limit, target["username"]))
+            connection.execute("UPDATE portal_users SET enabled=?,password_hash=?,retained_backup_limit=? WHERE username=?", (1 if is_enabled else 0, password_hash(password), retained_backup_limit, target["username"]))
         else:
-            connection.execute("UPDATE portal_users SET role=?,enabled=?,retained_backup_limit=? WHERE username=?", (role, 1 if enabled == "1" else 0, retained_backup_limit, target["username"]))
-    audit(audit_actor(request), "update_user", target["username"], {"role": role, "enabled": enabled == "1", "password_reset": bool(password), "retained_backup_limit": retained_backup_limit})
+            connection.execute("UPDATE portal_users SET enabled=?,retained_backup_limit=? WHERE username=?", (1 if is_enabled else 0, retained_backup_limit, target["username"]))
+    auth.set_direct_roles(target["username"], chosen)
+    audit(audit_actor(request), "update_user", target["username"], {"roles": sorted(chosen), "enabled": is_enabled, "password_reset": bool(password), "retained_backup_limit": retained_backup_limit})
     return RedirectResponse("/admin/users?message=User+updated", status_code=303)
+
+
+def identity_redirect(path: str, *, message: str = "", error: str = "") -> RedirectResponse:
+    query = f"?message={quote_plus(message)}" if message else (f"?error={quote_plus(error)}" if error else "")
+    return RedirectResponse(f"{path}{query}", status_code=303)
+
+
+@app.get("/admin/identity", response_class=HTMLResponse)
+async def identity_providers_page(request: Request):
+    require_permission(request, "users.manage", portal_wide=True)
+    providers = auth.list_providers()
+    counts = {item["provider_id"]: 0 for item in providers}
+    for account in list_users():
+        if account.get("auth_provider") in counts:
+            counts[account["auth_provider"]] += 1
+    return templates.TemplateResponse(request, "admin_identity.html", {
+        **base_context(request, "identity"), "providers": providers, "user_counts": counts,
+        "public_url": PORTAL_PUBLIC_URL, "presets": auth.SAML_PRESETS,
+        "weak_secret_key": SECRET_KEY in {"change-this-before-production", "replace-with-a-long-random-value"} or len(SECRET_KEY) < 32,
+    })
+
+
+@app.get("/admin/identity/new/{kind}", response_class=HTMLResponse)
+@app.get("/admin/identity/{provider_id}", response_class=HTMLResponse)
+async def identity_provider_page(request: Request, provider_id: str = "", kind: str = ""):
+    require_permission(request, "users.manage", portal_wide=True)
+    provider = auth.get_provider(provider_id) if provider_id else None
+    if provider_id and not provider:
+        raise HTTPException(404, "Identity provider not found.")
+    if not provider:
+        if kind not in {"ldap", "saml"}:
+            raise HTTPException(404, "Unknown provider type.")
+        preset = request.query_params.get("preset", "entra")
+        config = dict(auth.LDAP_DEFAULTS) if kind == "ldap" else {**auth.SAML_DEFAULTS, "preset": preset if preset in auth.SAML_PRESETS else "other"}
+        provider = {"provider_id": "", "kind": kind, "name": "", "enabled": False, "config": config}
+    groups: list[dict[str, str]] = []
+    group_error = ""
+    if provider["provider_id"] and provider["kind"] == "ldap" and "group_search" in request.query_params:
+        try:
+            groups = await asyncio.to_thread(auth.LdapDirectory(provider, secret_box).search_groups, request.query_params.get("group_search", ""))
+        except auth.IdentityError as exc:
+            group_error = str(exc)
+    pid = provider["provider_id"]
+    return templates.TemplateResponse(request, "admin_identity_edit.html", {
+        **base_context(request, "identity"), "provider": provider, "config": provider["config"],
+        "mappings": auth.group_mappings(pid) if pid else [], "presets": auth.SAML_PRESETS,
+        "public_url": PORTAL_PUBLIC_URL, "groups": groups, "group_error": group_error,
+        "group_search": request.query_params.get("group_search", ""),
+        "cert_fingerprint": auth.fingerprint(str(provider["config"].get("idp_x509_cert") or "")) if provider["kind"] == "saml" else "",
+        "sp_entity_id": f"{PORTAL_PUBLIC_URL}/auth/saml/{pid}/metadata" if pid and PORTAL_PUBLIC_URL else "",
+        "sp_acs_url": f"{PORTAL_PUBLIC_URL}/auth/saml/{pid}/acs" if pid and PORTAL_PUBLIC_URL else "",
+    })
+
+
+@app.post("/admin/identity/save")
+async def save_identity_provider(request: Request):
+    require_permission(request, "users.manage", portal_wide=True)
+    form = await request.form()
+    value = lambda name, default="": str(form.get(name, default) or "").strip()
+    kind, provider_id = value("kind"), value("provider_id").lower()
+    existing = auth.get_provider(provider_id)
+    back = f"/admin/identity/{provider_id}" if existing else f"/admin/identity/new/{kind}"
+    config: dict[str, Any] = dict(existing["config"]) if existing else {}
+    default_role = value("default_role")
+    config["default_role"] = default_role if default_role in auth.ROLES else ""
+    try:
+        if kind == "ldap":
+            auth.parse_ldaps_url(value("url"))
+            config.update({
+                "url": value("url"), "ca_pem": value("ca_pem"), "bind_dn": value("bind_dn"),
+                "user_base_dn": value("user_base_dn"), "user_filter": value("user_filter") or auth.LDAP_DEFAULTS["user_filter"],
+                "username_attribute": value("username_attribute") or "sAMAccountName", "group_base_dn": value("group_base_dn"),
+                "group_filter": value("group_filter") or auth.LDAP_DEFAULTS["group_filter"],
+                "nested_groups": value("nested_groups") == "1", "timeout_seconds": int(value("timeout_seconds") or 10),
+            })
+            if "{username}" not in config["user_filter"]:
+                raise auth.IdentityError("The user filter must contain {username}.")
+            if value("bind_password"):
+                config["bind_password_enc"] = secret_box.encrypt(value("bind_password"))
+            if not config["user_base_dn"] or not config["bind_dn"] or not config.get("bind_password_enc"):
+                raise auth.IdentityError("Enter the user search base, the service account DN and its password.")
+            auth.ldap_tls(config["ca_pem"])
+        elif kind == "saml":
+            preset = value("preset") if value("preset") in auth.SAML_PRESETS else "other"
+            config["preset"] = preset
+            if value("idp_metadata_xml"):
+                config.update(auth.parse_idp_metadata(value("idp_metadata_xml")))
+            else:
+                config.update({"idp_entity_id": value("idp_entity_id"), "idp_sso_url": value("idp_sso_url"), "idp_x509_cert": value("idp_x509_cert")})
+            for key in ("username_attribute", "email_attribute", "first_name_attribute", "last_name_attribute", "groups_attribute"):
+                config[key] = value(key)
+            if not config["idp_entity_id"] or not config["idp_sso_url"].startswith("https://") or not config["idp_x509_cert"]:
+                raise auth.IdentityError("Paste the IdP metadata, or enter its entity ID, an https:// sign-in URL and its signing certificate.")
+        else:
+            raise auth.IdentityError("Unknown provider type.")
+        auth.save_provider(provider_id, kind, value("name"), value("enabled") == "1", config)
+    except (auth.IdentityError, ValueError) as exc:
+        return identity_redirect(back, error=str(exc) if isinstance(exc, auth.IdentityError) else "Check the numeric fields.")
+    audit(audit_actor(request), "save_identity_provider", provider_id, {"kind": kind, "enabled": value("enabled") == "1", "created": not existing, "bind_password_changed": bool(value("bind_password"))})
+    return identity_redirect(f"/admin/identity/{provider_id}", message="Identity provider saved")
+
+
+@app.post("/admin/identity/{provider_id}/test")
+async def test_identity_provider(request: Request, provider_id: str, sample_user: str = Form("")):
+    require_permission(request, "users.manage", portal_wide=True)
+    provider = auth.get_provider(provider_id)
+    if not provider or provider["kind"] != "ldap":
+        raise HTTPException(404, "Directory not found.")
+    try:
+        results = await asyncio.to_thread(auth.LdapDirectory(provider, secret_box).test, sample_user.strip())
+    except auth.IdentityError as exc:
+        audit(audit_actor(request), "test_identity_provider", provider_id, {"result": "failed"}, outcome="failure")
+        return identity_redirect(f"/admin/identity/{provider_id}", error=f"Test failed: {exc}")
+    audit(audit_actor(request), "test_identity_provider", provider_id, {"result": "passed"})
+    return identity_redirect(f"/admin/identity/{provider_id}", message=" ".join(results))
+
+
+@app.post("/admin/identity/{provider_id}/delete")
+async def delete_identity_provider(request: Request, provider_id: str, confirmation: str = Form("")):
+    require_permission(request, "users.manage", portal_wide=True)
+    if not auth.get_provider(provider_id):
+        raise HTTPException(404, "Identity provider not found.")
+    if confirmation.strip() != provider_id:
+        return identity_redirect(f"/admin/identity/{provider_id}", error="Type the provider ID to confirm deletion.")
+    auth.delete_provider(provider_id)
+    audit(audit_actor(request), "delete_identity_provider", provider_id)
+    return identity_redirect("/admin/identity", message="Identity provider deleted. Its users can no longer sign in.")
+
+
+@app.post("/admin/identity/{provider_id}/mappings")
+async def add_identity_mapping(request: Request, provider_id: str, group_id: str = Form(...), group_name: str = Form(""), role_key: str = Form(...)):
+    require_permission(request, "users.manage", portal_wide=True)
+    if not auth.get_provider(provider_id):
+        raise HTTPException(404, "Identity provider not found.")
+    try:
+        auth.add_group_mapping(provider_id, group_id, group_name, role_key, audit_actor(request))
+    except auth.IdentityError as exc:
+        return identity_redirect(f"/admin/identity/{provider_id}", error=str(exc))
+    audit(audit_actor(request), "map_group_role", provider_id, {"group_id": group_id.strip(), "role": role_key})
+    return identity_redirect(f"/admin/identity/{provider_id}", message="Group mapped. Members get the role at their next sign-in.")
+
+
+@app.post("/admin/identity/{provider_id}/mappings/remove")
+async def remove_identity_mapping(request: Request, provider_id: str, group_id: str = Form(...), role_key: str = Form(...)):
+    require_permission(request, "users.manage", portal_wide=True)
+    auth.remove_group_mapping(provider_id, group_id, role_key)
+    audit(audit_actor(request), "unmap_group_role", provider_id, {"group_id": group_id, "role": role_key})
+    return identity_redirect(f"/admin/identity/{provider_id}", message="Mapping removed. It takes effect at each member's next sign-in.")
+
+
+@app.get("/admin/roles", response_class=HTMLResponse)
+async def roles_page(request: Request):
+    require_permission(request, "users.manage", portal_wide=True)
+    users = list_users()
+    holders = {key: sum(1 for account in users if key in account["direct_roles"] or key in account["group_roles"]) for key in auth.ROLES}
+    return templates.TemplateResponse(request, "admin_roles.html", {**base_context(request, "roles"), "holders": holders, "mappings": auth.group_mappings(), "providers": {item["provider_id"]: item for item in auth.list_providers()}})
 
 
 @app.post("/admin/impersonate/{username}")
@@ -1272,7 +1735,7 @@ async def stop_impersonation(request: Request):
 
 @app.post("/admin/labs/{project_id}/owner")
 async def admin_set_lab_owner(request: Request, project_id: str, username: str = Form(...)):
-    require_admin(request)
+    require_permission(request, "labs.all", portal_wide=True)
     target = user_record(username)
     if not target or not target.get("enabled"):
         return RedirectResponse("/?error=Choose+an+enabled+portal+user", status_code=303)
@@ -1282,33 +1745,36 @@ async def admin_set_lab_owner(request: Request, project_id: str, username: str =
 
 
 @app.post("/projects/{project_id}/shares")
-async def share_lab(request: Request, project_id: str, username: str = Form(...)):
+async def share_lab(request: Request, project_id: str, username: str = Form(...), return_to: str = Form("")):
+    require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can share this lab.")
     target = user_record(username)
     owner = lab_owner(project_id)
     if not target or not target.get("enabled") or target["username"] == owner:
-        return RedirectResponse("/?error=Choose+another+enabled+portal+user", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+        return redirect_back(return_to, project_id, "error=Choose+another+enabled+portal+user")
+    with db.connect() as connection:
         connection.execute("INSERT INTO lab_shares(project_id,username,shared_by,shared_at) VALUES(?,?,?,?) ON CONFLICT(project_id,username) DO UPDATE SET shared_by=excluded.shared_by, shared_at=excluded.shared_at", (project_id, target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "share_lab", project_id, {"shared_with": target["username"]})
-    return RedirectResponse("/?message=Lab+shared", status_code=303)
+    return redirect_back(return_to, project_id, "message=Lab+shared")
 
 
 @app.post("/projects/{project_id}/shares/{username}/remove")
-async def remove_lab_share(request: Request, project_id: str, username: str):
+async def remove_lab_share(request: Request, project_id: str, username: str, return_to: str = Form("")):
+    require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can change sharing.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_shares WHERE project_id=? AND username=?", (project_id, username))
     audit(audit_actor(request), "remove_lab_share", project_id, {"user": username})
-    return RedirectResponse("/?message=Lab+sharing+updated", status_code=303)
+    return redirect_back(return_to, project_id, "message=Lab+sharing+updated")
 
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/shares")
 async def share_backup(request: Request, project_id: str, snapshot_id: str, username: str = Form(...)):
+    require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can share a backup.")
@@ -1318,7 +1784,7 @@ async def share_backup(request: Request, project_id: str, snapshot_id: str, user
     snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
     if not any(str(item.get("snapshot_id")) == snapshot_id for item in snapshots):
         raise HTTPException(404, "Backup not found.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO backup_shares(project_id,snapshot_id,username,shared_by,shared_at) VALUES(?,?,?,?,?) ON CONFLICT(project_id,snapshot_id,username) DO UPDATE SET shared_by=excluded.shared_by, shared_at=excluded.shared_at", (project_id, snapshot_id, target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "share_backup", project_id, {"snapshot_id": snapshot_id, "shared_with": target["username"]})
     return RedirectResponse(f"/projects/{project_id}?message=Backup+shared", status_code=303)
@@ -1329,7 +1795,7 @@ async def remove_backup_share(request: Request, project_id: str, snapshot_id: st
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can change backup sharing.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=? AND username=?", (project_id, snapshot_id, username))
     audit(audit_actor(request), "remove_backup_share", project_id, {"snapshot_id": snapshot_id, "user": username})
     return RedirectResponse(f"/projects/{project_id}?message=Backup+sharing+updated", status_code=303)
@@ -1337,6 +1803,7 @@ async def remove_backup_share(request: Request, project_id: str, snapshot_id: st
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/template")
 async def create_lab_template(request: Request, project_id: str, snapshot_id: str, name: str = Form(...), description: str = Form("")):
+    require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can create a template.")
@@ -1358,12 +1825,12 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
         await asyncio.to_thread(shutil.copy2, source, destination)
         if destination.stat().st_size != source.stat().st_size:
             raise OSError("Template archive size verification failed")
-        with sqlite3.connect(AUDIT_DB) as connection:
-            status_value = "approved" if has_admin_scope(request) else "pending"
+        with db.connect() as connection:
+            status_value = "approved" if admin_permission(request, "templates.approve") else "pending"
             approved_by = audit_actor(request) if status_value == "approved" else None
             approved_at = datetime.now(timezone.utc).isoformat() if status_value == "approved" else None
             connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at,approval_status,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat(), status_value, approved_by, approved_at))
-    except sqlite3.IntegrityError:
+    except db.IntegrityError:
         shutil.rmtree(template_dir, ignore_errors=True)
         return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template", status_code=303)
     except OSError:
@@ -1377,12 +1844,12 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
 @app.post("/templates/{template_id}/access")
 async def grant_template_access(request: Request, template_id: str, username: str = Form(...)):
     template = template_record(template_id)
-    if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
+    if not template or (not has_admin_scope(request) and not admin_permission(request, "templates.approve") and template["owner"] != current_user(request)):
         raise HTTPException(404, "Lab template not found.")
     target = user_record(username.strip())
     if not target or not target.get("enabled"):
         return RedirectResponse(f"/projects/{template['source_project_id']}?error=Choose+an+enabled+portal+user", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO lab_template_access(template_id,subject_type,subject_id,granted_by,granted_at) VALUES(?,?,?,?,?) ON CONFLICT(template_id,subject_type,subject_id) DO UPDATE SET granted_by=excluded.granted_by,granted_at=excluded.granted_at", (template_id, "local_user", target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "grant_lab_template", template["source_project_id"], {"template_id": template_id, "username": target["username"]})
     return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+shared", status_code=303)
@@ -1391,9 +1858,9 @@ async def grant_template_access(request: Request, template_id: str, username: st
 @app.post("/templates/{template_id}/access/{username}/remove")
 async def revoke_template_access(request: Request, template_id: str, username: str):
     template = template_record(template_id)
-    if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
+    if not template or (not has_admin_scope(request) and not admin_permission(request, "templates.approve") and template["owner"] != current_user(request)):
         raise HTTPException(404, "Lab template not found.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_template_access WHERE template_id=? AND subject_type='local_user' AND subject_id=?", (template_id, username))
     audit(audit_actor(request), "revoke_lab_template", template["source_project_id"], {"template_id": template_id, "username": username})
     return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+access+updated", status_code=303)
@@ -1402,9 +1869,9 @@ async def revoke_template_access(request: Request, template_id: str, username: s
 @app.post("/templates/{template_id}/unpublish")
 async def unpublish_template(request: Request, template_id: str):
     template = template_record(template_id)
-    if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
+    if not template or (not has_admin_scope(request) and not admin_permission(request, "templates.approve") and template["owner"] != current_user(request)):
         raise HTTPException(404, "Lab template not found.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_template_access WHERE template_id=?", (template_id,))
         connection.execute("DELETE FROM lab_templates WHERE template_id=?", (template_id,))
     archive_path = Path(str(template.get("archive_path") or ""))
@@ -1414,27 +1881,84 @@ async def unpublish_template(request: Request, template_id: str):
     except (OSError, ValueError):
         pass
     audit(audit_actor(request), "unpublish_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"]})
-    return RedirectResponse("/?message=Lab+template+unpublished", status_code=303)
+    return RedirectResponse("/templates?message=Lab+template+unpublished", status_code=303)
 
 
 @app.post("/templates/{template_id}/approve")
 async def approve_template(request: Request, template_id: str):
-    require_admin(request)
+    require_permission(request, "templates.approve", portal_wide=True)
     template = template_record(template_id)
     if not template:
         raise HTTPException(404, "Lab template not found.")
     if template.get("approval_status") == "approved":
-        return RedirectResponse("/?message=Lab+template+is+already+approved", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+        return RedirectResponse("/templates?message=Lab+template+is+already+approved", status_code=303)
+    with db.connect() as connection:
         connection.execute("UPDATE lab_templates SET approval_status='approved',approved_by=?,approved_at=? WHERE template_id=?", (audit_actor(request), datetime.now(timezone.utc).isoformat(), template_id))
     audit(audit_actor(request), "approve_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"], "owner": template["owner"]})
-    return RedirectResponse("/?message=Lab+template+approved+and+published", status_code=303)
+    return RedirectResponse("/templates?message=Lab+template+approved+and+published", status_code=303)
+
+
+def base_context(request: Request, active_nav: str = "") -> dict[str, Any]:
+    """Values every page in the console layout needs."""
+    return {
+        "user": current_user(request), "signed_in_user": signed_in_user(request),
+        "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
+        "has_admin_scope": has_admin_scope(request), "active_nav": active_nav,
+        "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
+    context = await lab_overview(request)
+    if not isinstance(context, dict):
+        return context
+    return templates.TemplateResponse(request, "dashboard.html", {**context, "active_nav": "labs"})
+
+
+@app.get("/labs/new", response_class=HTMLResponse)
+async def new_lab_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    require_permission(request, "labs.create")
+    context = await lab_overview(request)
+    if not isinstance(context, dict):
+        return context
+    return templates.TemplateResponse(request, "new_lab.html", {**context, "active_nav": "new_lab"})
+
+
+@app.get("/templates", response_class=HTMLResponse)
+async def templates_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    context = await lab_overview(request)
+    if not isinstance(context, dict):
+        return context
+    return templates.TemplateResponse(request, "templates.html", {**context, "active_nav": "templates"})
+
+
+@app.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    context = base_context(request, "activity")
+    context["audit"] = recent_audit(limit=500, username=current_user(request), include_all=admin_permission(request, "audit.all"))
+    context["audit_all"] = admin_permission(request, "audit.all")
+    return templates.TemplateResponse(request, "activity.html", context)
+
+
+@app.get("/admin/status", response_class=HTMLResponse)
+async def server_status_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    require_permission(request, "servers.view", portal_wide=True)
+    return templates.TemplateResponse(request, "server_status.html", base_context(request, "status"))
+
+
+async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
+    """Collect labs, backups and templates for the labs, new-lab and templates pages."""
     try:
         projects = await gns3("GET", "/v2/projects")
         # Keep the dashboard stable: older labs stay at the top and each new
@@ -1469,7 +1993,7 @@ async def dashboard(request: Request):
     pending_templates: list[dict[str, Any]] = []
     if AUTH_ENABLED:
         templates_to_show = approved_templates()
-        pending_source = templates_for_user(current_user(request), include_owned=has_admin_scope(request))
+        pending_source = templates_for_user(current_user(request), include_owned=has_admin_scope(request) or admin_permission(request, "templates.approve"))
         for template in templates_to_show:
             archive_path = Path(str(template.get("archive_path") or ""))
             try:
@@ -1489,17 +2013,20 @@ async def dashboard(request: Request):
     # The dashboard action is deliberately derived from node state, rather
     # than project open/closed state. Built-in Cloud and Ethernet switch nodes
     # are always reported as started by GNS3 and are not lab workloads.
-    for project, nodes in zip(projects, node_lists):
-        project["is_running"] = any(
-            not is_non_stoppable_node(node) and node.get("status") != "stopped"
-            for node in nodes
-        )
+    for project, nodes, snapshots in zip(projects, node_lists, snapshot_lists):
+        workload_nodes = [node for node in nodes if not is_non_stoppable_node(node)]
+        project["node_total"] = len(workload_nodes)
+        project["node_running"] = sum(1 for node in workload_nodes if node.get("status") != "stopped")
+        project["is_running"] = project["node_running"] > 0
+        project["backup_count"] = len(snapshots)
+        backup_times = [format_backup_datetime(item.get("created_at")) for item in snapshots if item.get("created_at")]
+        project["last_backup_at"] = max((value for value in backup_times if value[:1].isdigit()), default="")
         project["access_lab_url"] = gns3_webui_project_url(project["project_id"])
         project["owner"] = lab_owner(project["project_id"]) or "Unassigned"
         project["shared_with"] = shared_users(project["project_id"])
         project["can_share"] = can_manage_lab_sharing(request, project["project_id"])
         project["lab_group"] = "user" if has_admin_scope(request) and project["owner"] not in {current_user(request), "Unassigned"} else "mine"
-    return templates.TemplateResponse(request, "dashboard.html", {
+    return {
         "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "available_templates": available_templates, "pending_templates": pending_templates, "user": current_user(request),
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
@@ -1507,15 +2034,17 @@ async def dashboard(request: Request):
         "my_lab_count": sum(1 for project in projects if project["lab_group"] == "mine"),
         "user_lab_count": sum(1 for project in projects if project["lab_group"] == "user"),
         "retained_backups": retained_backups_for(None if has_admin_scope(request) else current_user(request)),
-        "gns3_url": GNS3_URL, "audit": recent_audit(username=current_user(request), include_all=has_admin_scope(request)),
+        "gns3_url": GNS3_URL, "has_admin_scope": has_admin_scope(request),
         "import_job_id": request.query_params.get("import_job", ""),
-    })
+        "running_lab_count": sum(1 for project in projects if project["is_running"]),
+        "running_node_count": sum(project["node_running"] for project in projects),
+        "unassigned_lab_count": sum(1 for project in projects if project["owner"] == "Unassigned"),
+    }
 
 
 @app.get("/admin/system-status")
 async def administrator_system_status(request: Request):
-    if AUTH_ENABLED and not has_admin_scope(request):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access is required.")
+    require_permission(request, "servers.view", portal_wide=True)
     try:
         computes = await gns3("GET", "/v2/computes")
         if not isinstance(computes, list) or not computes:
@@ -1533,17 +2062,23 @@ async def administrator_system_status(request: Request):
     memory_used = numeric_value(compute, "memory_usage", "memory_used", "memory_used_bytes")
     if memory_total and memory_used is not None and memory_used <= 100 and memory_total > 1024:
         memory_used = memory_total * memory_used / 100
+    # GNS3 v2 computes report memory only as memory_usage_percent, without totals.
+    memory_percent = numeric_value(compute, "memory_usage_percent", "memory_percent")
+    if memory_percent is None and memory_total and memory_used is not None:
+        memory_percent = memory_used / memory_total * 100
     now = perf_counter(); current = disk_io_counters(PORTAL_MONITOR_DISKS); previous = app.state.monitor_disk_samples
     disks: dict[str, dict[str, float | int | None]] = {}
     for device, values in current.items():
         old = previous.get(device); elapsed = max(0.001, now - float(old.get("sampled_at", now))) if old else 0.0
         disks[device] = {**values, "read_bytes_per_second": max(0.0, (values["read_bytes"] - int(old["read_bytes"])) / elapsed) if old else None, "write_bytes_per_second": max(0.0, (values["write_bytes"] - int(old["write_bytes"])) / elapsed) if old else None}
     app.state.monitor_disk_samples = {device: {**values, "sampled_at": now} for device, values in current.items()}
-    return {"available": cpu_percent is not None or memory_total is not None, "cpu_percent": cpu_percent, "memory_total_bytes": int(memory_total) if memory_total is not None else None, "memory_used_bytes": int(memory_used) if memory_used is not None else None, "disks": disks, "message": "" if (cpu_percent is not None or memory_total is not None) else "This GNS3 server did not provide CPU or memory status."}
+    available = cpu_percent is not None or memory_percent is not None
+    return {"available": available, "cpu_percent": cpu_percent, "memory_percent": memory_percent, "memory_total_bytes": int(memory_total) if memory_total is not None else None, "memory_used_bytes": int(memory_used) if memory_used is not None else None, "disks": disks, "message": "" if available else "This GNS3 server did not provide CPU or memory status."}
 
 
 @app.post("/projects")
 async def create_project(request: Request, name: str = Form(...)):
+    require_permission(request, "labs.create")
     user = current_user(request)
     name = name.strip()
     if not name or len(name) > 80:
@@ -1562,32 +2097,48 @@ async def create_project(request: Request, name: str = Form(...)):
     return RedirectResponse(f"/projects/{project['project_id']}", status_code=303)
 
 
+def redirect_back(return_to: str, project_id: str, query: str = "") -> RedirectResponse:
+    """Redirect to the lab page a form came from, or to the labs list.
+
+    Only this lab's own page is accepted, so the field cannot be used as an
+    open redirect.
+    """
+    path, _, fragment = (return_to or "").partition("#")
+    target = path if path == f"/projects/{project_id}" else "/"
+    url = target + (f"?{query}" if query else "")
+    if target != "/" and fragment.isalpha():
+        url += f"#{fragment}"
+    return RedirectResponse(url, status_code=303)
+
+
 @app.post("/projects/{project_id}/start")
-async def start_lab(request: Request, project_id: str):
+async def start_lab(request: Request, project_id: str, return_to: str = Form("")):
+    require_permission(request, "labs.operate")
     user = current_user(request)
     require_project_access(request, project_id)
     if backup_is_active(project_id):
-        return RedirectResponse("/?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+starting+nodes", status_code=303)
+        return redirect_back(return_to, project_id, "error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+starting+nodes")
     try:
         started, ignored = await set_lab_node_power(project_id, "start")
     except HTTPException as exc:
-        return RedirectResponse(f"/?error={quote_plus(str(exc.detail))}", status_code=303)
+        return redirect_back(return_to, project_id, f"error={quote_plus(str(exc.detail))}")
     audit(audit_actor(request), "start_lab", project_id, {"nodes_started": started, "non_stoppable_nodes": ignored})
-    return RedirectResponse(f"/?message={quote_plus(f'Start requested for {started} lab node(s).')}", status_code=303)
+    return redirect_back(return_to, project_id, f"message={quote_plus(f'Start requested for {started} lab node(s).')}")
 
 
 @app.post("/projects/{project_id}/stop")
-async def stop_lab(request: Request, project_id: str):
+async def stop_lab(request: Request, project_id: str, return_to: str = Form("")):
+    require_permission(request, "labs.operate")
     user = current_user(request)
     require_project_access(request, project_id)
     if backup_is_active(project_id):
-        return RedirectResponse("/?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+stopping+nodes", status_code=303)
+        return redirect_back(return_to, project_id, "error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+stopping+nodes")
     try:
         stopped, ignored = await set_lab_node_power(project_id, "stop")
     except HTTPException as exc:
-        return RedirectResponse(f"/?error={quote_plus(str(exc.detail))}", status_code=303)
+        return redirect_back(return_to, project_id, f"error={quote_plus(str(exc.detail))}")
     audit(audit_actor(request), "stop_lab", project_id, {"nodes_stopped": stopped, "non_stoppable_nodes": ignored})
-    return RedirectResponse(f"/?message={quote_plus(f'Stop requested for {stopped} lab node(s).')}", status_code=303)
+    return redirect_back(return_to, project_id, f"message={quote_plus(f'Stop requested for {stopped} lab node(s).')}")
 
 
 @app.get("/projects/{project_id}", response_class=HTMLResponse)
@@ -1597,10 +2148,15 @@ async def project_page(request: Request, project_id: str):
     try:
         require_project_access(request, project_id)
         project = await gns3("GET", f"/v2/projects/{project_id}")
-        snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
+        snapshots, nodes = await asyncio.gather(
+            gns3("GET", f"/v2/projects/{project_id}/snapshots"),
+            gns3("GET", f"/v2/projects/{project_id}/nodes"),
+        )
     except HTTPException as exc:
         return error_page(request, exc)
     snapshots, snapshot_total_bytes, storage_scanned = snapshot_storage(project, snapshots)
+    nodes = sorted(nodes or [], key=lambda node: str(node.get("name", "")).lower())
+    node_running = sum(1 for node in nodes if not is_non_stoppable_node(node) and node.get("status") != "stopped")
     snapshots.sort(key=lambda item: str(item.get("completed_at") or item.get("created_at") or ""))
     requested_job_id = request.query_params.get("backup_job", "")
     backup_job_id = requested_job_id if requested_job_id in app.state.backup_jobs else ""
@@ -1609,6 +2165,8 @@ async def project_page(request: Request, project_id: str):
                               if job.get("project_id") == project_id and job.get("status") in ACTIVE_BACKUP_STATES), "")
     return templates.TemplateResponse(request, "project.html", {
         "project": project, "snapshots": snapshots, "snapshot_total_bytes": snapshot_total_bytes,
+        "nodes": nodes, "node_running": node_running, "node_total": sum(1 for node in nodes if not is_non_stoppable_node(node)),
+        "access_lab_url": gns3_webui_project_url(project_id), "active_nav": "labs", "lab_shared_with": shared_users(project_id), "has_admin_scope": has_admin_scope(request),
         "storage_scanned": storage_scanned, "user": current_user(request), "gns3_url": GNS3_URL,
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "can_share": can_manage_lab_sharing(request, project_id), "lab_owner": lab_owner(project_id), "portal_users": [account for account in list_users() if account.get("enabled")],
@@ -1625,6 +2183,7 @@ async def project_page(request: Request, project_id: str):
 
 @app.post("/projects/{project_id}/snapshots")
 async def create_snapshot(request: Request, project_id: str, name: str = Form(...), stop_confirmation: str = Form("")):
+    require_permission(request, "labs.edit")
     user = current_user(request)
     require_project_access(request, project_id)
     name = name.strip()
@@ -1739,12 +2298,14 @@ async def queue_snapshot_import(request: Request, project_id: str, snapshot_id: 
 
 @app.post("/backup-imports")
 async def create_lab_from_backup(request: Request, source_project_id: str = Form(...), snapshot_id: str = Form(...), name: str = Form(...)):
+    require_permission(request, "labs.create")
     """Create a new lab from a selected backup on the dashboard."""
     return await queue_snapshot_import(request, source_project_id, snapshot_id, name)
 
 
 @app.post("/shared-backup-imports")
 async def create_lab_from_shared_backup(request: Request, source_project_id: str = Form(...), snapshot_id: str = Form(...), name: str = Form(...)):
+    require_permission(request, "labs.create")
     user = current_user(request)
     if not has_admin_scope(request) and not any(item["project_id"] == source_project_id and item["snapshot_id"] == snapshot_id for item in backup_shares_for(user)):
         raise HTTPException(404, "Shared backup not found.")
@@ -1764,6 +2325,7 @@ async def create_lab_from_shared_backup(request: Request, source_project_id: str
 
 @app.post("/template-imports")
 async def create_lab_from_template(request: Request, template_id: str = Form(...), name: str = Form(...)):
+    require_permission(request, "labs.create")
     user = current_user(request)
     template = template_record(template_id)
     if not template or template.get("approval_status") != "approved":
@@ -1787,6 +2349,7 @@ async def create_lab_from_template(request: Request, template_id: str = Form(...
 
 @app.post("/retained-backup-imports")
 async def create_lab_from_retained_backup(request: Request, backup_id: str = Form(...), name: str = Form(...)):
+    require_permission(request, "labs.create")
     user = current_user(request)
     record = next((item for item in retained_backups_for(None if is_admin(request) else user) if item["backup_id"] == backup_id), None)
     if not record or not Path(record["archive_path"]).is_file():
@@ -1801,6 +2364,7 @@ async def create_lab_from_retained_backup(request: Request, backup_id: str = For
 
 @app.post("/backup-uploads")
 async def upload_backup_as_lab(request: Request, name: str = Form(...), backup_file: UploadFile = File(...)):
+    require_permission(request, "labs.create")
     """Accept a portable/native backup and queue a new powered-off lab import."""
     user = current_user(request)
     new_name = name.strip()
@@ -1831,6 +2395,7 @@ async def upload_backup_as_lab(request: Request, name: str = Form(...), backup_f
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/clone")
 async def clone_snapshot_as_lab(request: Request, project_id: str, snapshot_id: str, name: str = Form(...)):
+    require_permission(request, "labs.create")
     """Legacy endpoint retained for existing links; it returns to the dashboard."""
     require_project_access(request, project_id)
     return await queue_snapshot_import(request, project_id, snapshot_id, name)
@@ -1857,26 +2422,30 @@ async def dashboard_import_job_status(request: Request, job_id: str):
 
 
 @app.post("/projects/{project_id}/rename")
-async def rename_project(request: Request, project_id: str, name: str = Form(...)):
+async def rename_project(request: Request, project_id: str, name: str = Form(...), return_to: str = Form("")):
+    require_permission(request, "labs.edit")
     user = current_user(request)
     require_project_access(request, project_id)
     new_name = name.strip()
     if not new_name or len(new_name) > 80:
-        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
+        return redirect_back(return_to, project_id, "error=Use+a+lab+name+between+1+and+80+characters")
     try:
         project = await gns3("GET", f"/v2/projects/{project_id}")
         old_name = str(project.get("name", ""))
         if new_name == old_name:
-            return RedirectResponse("/", status_code=303)
+            return redirect_back(return_to, project_id)
         await gns3("PUT", f"/v2/projects/{project_id}", json={"name": new_name})
     except HTTPException as exc:
-        return RedirectResponse(f"/?error={quote_plus(str(exc.detail))}", status_code=303)
+        return redirect_back(return_to, project_id, f"error={quote_plus(str(exc.detail))}")
     audit(audit_actor(request), "rename_lab", project_id, {"old_name": old_name, "new_name": new_name})
-    return RedirectResponse("/?message=Lab+renamed", status_code=303)
+    return redirect_back(return_to, project_id, "message=Lab+renamed")
 
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/restore")
 async def restore_snapshot(request: Request, project_id: str, snapshot_id: str):
+    require_permission(request, "labs.edit")
+    require_project_access(request, project_id)
+    require_lab_owner(request, project_id)
     user = current_user(request)
     require_project_access(request, project_id)
     try:
@@ -1890,6 +2459,9 @@ async def restore_snapshot(request: Request, project_id: str, snapshot_id: str):
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/delete")
 async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
+    require_permission(request, "labs.edit")
+    require_project_access(request, project_id)
+    require_lab_owner(request, project_id)
     user = current_user(request)
     require_project_access(request, project_id)
     try:
@@ -1897,7 +2469,7 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
         await gns3("DELETE", f"/v2/projects/{project_id}/snapshots/{snapshot_id}")
     except HTTPException as exc:
         return RedirectResponse(f"/projects/{project_id}?error={quote_plus(str(exc.detail))}", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=?", (project_id, snapshot_id))
     audit(audit_actor(request), "delete_snapshot", project_id, {"snapshot_id": snapshot_id})
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
@@ -1905,6 +2477,9 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
 
 @app.post("/projects/{project_id}/snapshots/delete")
 async def delete_selected_snapshots(request: Request, project_id: str, snapshot_ids: list[str] = Form(...)):
+    require_permission(request, "labs.edit")
+    require_project_access(request, project_id)
+    require_lab_owner(request, project_id)
     """Permanently remove selected completed backups after browser confirmation."""
     require_project_access(request, project_id)
     selected_ids = {snapshot_id for snapshot_id in snapshot_ids if snapshot_id}
@@ -1925,7 +2500,7 @@ async def delete_selected_snapshots(request: Request, project_id: str, snapshot_
             failed += 1
             portal_logger.warning("bulk_snapshot_delete_failed project_id=%s snapshot_id=%s", project_id, snapshot_id)
             continue
-        with sqlite3.connect(AUDIT_DB) as connection:
+        with db.connect() as connection:
             connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=?", (project_id, snapshot_id))
         deleted.append(snapshot_id)
     if deleted:
@@ -1938,6 +2513,9 @@ async def delete_selected_snapshots(request: Request, project_id: str, snapshot_
 
 @app.post("/projects/{project_id}/delete")
 async def delete_project(request: Request, project_id: str, confirmation: str = Form(...), retained_snapshot_ids: list[str] = Form([])):
+    require_permission(request, "labs.edit")
+    require_project_access(request, project_id)
+    require_lab_owner(request, project_id)
     user = current_user(request)
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
@@ -1966,11 +2544,11 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
             backup_id = str(uuid.uuid4())
             destination = target_dir / f"{backup_id}.gns3snapshot"
             await asyncio.to_thread(shutil.copy2, source, destination)
-            with sqlite3.connect(AUDIT_DB) as connection:
+            with db.connect() as connection:
                 connection.execute("INSERT INTO retained_backups(backup_id,owner,source_project_id,source_lab_name,backup_name,archive_path,size_bytes,retained_at) VALUES(?,?,?,?,?,?,?,?)", (backup_id, user, project_id, str(project.get("name", "Lab")), str(snapshot.get("name", "Unnamed backup")), str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat()))
             retained += 1
     await gns3("DELETE", f"/v2/projects/{project_id}")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_owners WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM lab_shares WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM backup_shares WHERE project_id=?", (project_id,))

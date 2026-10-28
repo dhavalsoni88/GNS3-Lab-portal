@@ -1,1 +1,82 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}My Lab{% endblock %}</title><link rel="stylesheet" href="/static/app.css"></head><body>{% if not login_page %}<header><a class="brand" href="/">My Lab</a>{% if auth_enabled and user %}{% set account_name = signed_in_user or user %}<details class="account-menu"><summary aria-label="Open account menu"><span class="account-avatar" aria-hidden="true">{% if account_name | account_has_avatar %}<img src="/profile/avatar" alt="">{% else %}<svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>{% endif %}</span><span>{{ account_name | account_display_name }}</span><span class="account-caret" aria-hidden="true">▾</span></summary><div class="account-panel"><a href="/profile">My Profile</a>{% if can_manage_users %}<a href="/admin/users">Manage Users</a>{% endif %}<form action="/logout" method="post"><button>Sign out</button></form></div></details>{% endif %}</header>{% endif %}<main>{% if impersonating %}<section class="impersonation-banner">You are managing labs as <strong>{{ impersonating }}</strong>.<form action="/admin/stop-impersonation" method="post"><button class="secondary">Return to admin</button></form></section>{% endif %}{% block content %}{% endblock %}</main><script>document.querySelectorAll('time.local-time').forEach(node=>{const value=new Date(node.dateTime);if(!Number.isNaN(value.valueOf()))node.textContent=value.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})});const accountMenu=document.querySelector('.account-menu');if(accountMenu){document.addEventListener('pointerdown',event=>{if(accountMenu.open&&!accountMenu.contains(event.target))accountMenu.open=false});document.addEventListener('keydown',event=>{if(event.key==='Escape')accountMenu.open=false})}</script>{% block scripts %}{% endblock %}</body></html>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}GNS3 Lab Portal{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+{% if login_page %}
+{% block login %}{% endblock %}
+{% else %}
+{% set active = active_nav | default('') %}
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-top">
+      <a class="brand" href="/">
+        <svg width="24" height="24" viewBox="0 0 26 26" aria-hidden="true"><circle cx="6" cy="6" r="3.5" fill="none" stroke="#93c5fd" stroke-width="2"/><circle cx="20" cy="6" r="3.5" fill="none" stroke="#93c5fd" stroke-width="2"/><circle cx="13" cy="20" r="3.5" fill="none" stroke="#93c5fd" stroke-width="2"/><path d="M9.5 6h7M8 9l3.4 7.6M18 9l-3.4 7.6" stroke="#93c5fd" stroke-width="2" fill="none"/></svg>
+        GNS3 Lab Portal
+      </a>
+      <details class="sidebar-menu" open>
+        <summary aria-label="Menu"><svg width="22" height="22" viewBox="0 0 22 22" aria-hidden="true"><path d="M3 6h16M3 11h16M3 16h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></summary>
+        <nav aria-label="Main">
+          <div class="nav-group">
+            <div class="nav-group-title">Workspace</div>
+            <a class="nav-link" href="/" {% if active == 'labs' %}aria-current="page"{% endif %}>Labs</a>
+            {% if can(request, 'labs.create') %}<a class="nav-link" href="/labs/new" {% if active == 'new_lab' %}aria-current="page"{% endif %}>New lab</a>{% endif %}
+            {% if auth_enabled %}<a class="nav-link" href="/templates" {% if active == 'templates' %}aria-current="page"{% endif %}>Templates</a>
+            <a class="nav-link" href="/activity" {% if active == 'activity' %}aria-current="page"{% endif %}>{% if admin_can(request, 'audit.all') %}Audit log{% else %}My activity{% endif %}</a>{% endif %}
+          </div>
+          {% if admin_can(request, 'servers.view') %}
+          <div class="nav-group">
+            <div class="nav-group-title">Infrastructure</div>
+            <a class="nav-link" href="/admin/status" {% if active == 'status' %}aria-current="page"{% endif %}>Server status</a>
+          </div>
+          {% endif %}
+          {% if can_manage_users %}
+          <div class="nav-group">
+            <div class="nav-group-title">Administration</div>
+            <a class="nav-link" href="/admin/users" {% if active == 'users' %}aria-current="page"{% endif %}>Users</a>
+            <a class="nav-link" href="/admin/roles" {% if active == 'roles' %}aria-current="page"{% endif %}>Roles &amp; groups</a>
+            <a class="nav-link" href="/admin/identity" {% if active == 'identity' %}aria-current="page"{% endif %}>Identity providers</a>
+          </div>
+          {% endif %}
+        </nav>
+      </details>
+    </div>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div class="spacer"></div>
+      {% if active != 'new_lab' and can(request, 'labs.create') %}<a class="button primary" href="/labs/new">+ New lab</a>{% endif %}
+      {% if auth_enabled and user %}{% set account_name = signed_in_user or user %}
+      <details class="menu account-menu">
+        <summary aria-label="Account menu"><span class="account-avatar" aria-hidden="true">{% if account_name | account_has_avatar %}<img src="/profile/avatar" alt="">{% else %}<svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>{% endif %}</span><span>{{ account_name | account_display_name }}</span>{% if is_admin %}<span class="role-label">· Platform Admin</span>{% endif %}</summary>
+        <div class="menu-panel">
+          <a href="/profile">My profile</a>
+          <form action="/logout" method="post"><button class="menu-item">Sign out</button></form>
+        </div>
+      </details>
+      {% endif %}
+    </header>
+    <main class="content" id="content">
+      {% if impersonating %}<section class="impersonation-banner"><span>You are viewing the portal as <strong>{{ impersonating }}</strong>. Actions are recorded under your own name.</span><form action="/admin/stop-impersonation" method="post"><button>Return to administrator view</button></form></section>{% endif %}
+      {% if request.query_params.get('error') %}<p class="error" role="alert">{{ request.query_params.get('error').replace('+',' ') }}</p>{% endif %}
+      {% if request.query_params.get('message') %}<p class="notice" role="status">{{ request.query_params.get('message').replace('+',' ') }}</p>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+{% endif %}
+<script>
+document.querySelectorAll('time.local-time').forEach(node=>{const value=new Date(node.dateTime);if(!Number.isNaN(value.valueOf()))node.textContent=value.toLocaleString(undefined,{dateStyle:'medium',timeStyle:'short'})});
+(()=>{const side=document.querySelector('.sidebar-menu');if(side&&window.matchMedia('(max-width: 900px)').matches)side.open=false;
+const menus=()=>document.querySelectorAll('details.menu[open]');
+document.addEventListener('pointerdown',event=>menus().forEach(menu=>{if(!menu.contains(event.target))menu.open=false}));
+document.addEventListener('keydown',event=>{if(event.key==='Escape')menus().forEach(menu=>{menu.open=false;menu.querySelector('summary')?.focus()})});
+document.addEventListener('toggle',event=>{const opened=event.target;if(opened.matches?.('details.menu')&&opened.open)menus().forEach(menu=>{if(menu!==opened&&!menu.contains(opened))menu.open=false})},true)})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

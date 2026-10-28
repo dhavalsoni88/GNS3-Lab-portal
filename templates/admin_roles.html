@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Roles & groups · GNS3 Lab Portal{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Roles &amp; groups</h1><p class="subtitle">Each user gets the roles assigned to them directly, plus the roles of their mapped directory or SSO groups. Group roles refresh at every sign-in.</p></div></div>
+<div class="table-card">
+  <table class="data">
+    <thead><tr><th scope="col">Permission</th>{% for key, role in ROLES.items() %}<th scope="col" style="text-align:center">{{ role[0] }}<div class="cell-meta" style="font-weight:400">{{ holders[key] }} user{{ '' if holders[key] == 1 else 's' }}</div></th>{% endfor %}</tr></thead>
+    <tbody>{% for permission, description in PERMISSIONS.items() %}
+      <tr><td>{{ description }}</td>{% for key, role in ROLES.items() %}<td style="text-align:center">{% if permission in role[1] %}<span aria-label="Yes" style="color:var(--ok-dot);font-weight:700">✓</span>{% else %}<span class="visually-hidden">No</span><span aria-hidden="true" class="muted">·</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}
+      <tr><td>See and open labs they own or that are shared with them</td>{% for key in ROLES %}<td style="text-align:center"><span style="color:var(--ok-dot);font-weight:700" aria-label="Yes">✓</span></td>{% endfor %}</tr>
+    </tbody>
+  </table>
+</div>
+<p class="muted" style="margin:0">Roles combine: someone who is both a Lab Editor and a Template Approver can do everything either role allows. Template Approver and Auditor are usually given alongside Lab Editor. Opening a lab hands the user to the GNS3 web interface, where GNS3's own permissions apply.</p>
+
+<section class="table-card" aria-labelledby="mappings-heading">
+  <div class="card-head" style="padding:14px 16px 0"><h2 id="mappings-heading">Group mappings</h2><a class="button" href="/admin/identity">Identity providers</a></div>
+  <table class="data responsive">
+    <thead><tr><th scope="col">Group</th><th scope="col">Provider</th><th scope="col">Role</th><th scope="col">Added by</th></tr></thead>
+    <tbody>{% for mapping in mappings %}{% set provider = providers.get(mapping.provider_id) %}
+      <tr><td class="primary-cell"><span class="cell-title">{{ mapping.group_name }}</span><div class="cell-meta mono" style="word-break:break-all">{{ mapping.group_id }}</div></td><td data-label="Provider"><a href="/admin/identity/{{ mapping.provider_id }}">{{ provider.name if provider else mapping.provider_id }}</a></td><td data-label="Role">{{ mapping.role_key | role_name }}</td><td data-label="Added by">{{ mapping.created_by }}</td></tr>
+    {% else %}<tr><td class="empty" colspan="4">No groups are mapped yet. Add mappings on an identity provider's page.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
