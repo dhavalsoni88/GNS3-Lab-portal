@@ -1,21 +1,208 @@
 {% extends "base.html" %}
-{% block title %}{{ project.name }} · GNS3 Portal{% endblock %}
+{% block title %}{{ project.name }} · GNS3 Lab Portal{% endblock %}
 {% block content %}
-<a class="back" href="/">← All labs</a>
-<div class="title"><div><p class="eyebrow">Lab</p><h1>{{ project.name }}</h1><p class="muted">{{ project.project_id }}</p></div></div>
-{% if request.query_params.get('error') %}<p class="error">{{ request.query_params.get('error').replace('+',' ') }}</p>{% endif %}
-{% if request.query_params.get('message') %}<p class="notice">{{ request.query_params.get('message').replace('+',' ') }}</p>{% endif %}
-<section class="card create"><h2>Export lab</h2><p class="muted">Download a portable GNS3 project archive to share or keep off-server. Imported copies need the same appliance images/templates available on the destination controller.</p><a class="button secondary" href="/projects/{{ project.project_id }}/export">Download portable lab</a></section>
-<section class="card create"><h2>Create lab backup</h2><p class="muted">The portal stops every lab node, waits for GNS3 to confirm they are off, then creates a native controller backup. Nodes remain off after the backup.</p><form class="backup-create-form" method="post" action="/projects/{{ project.project_id }}/snapshots" onsubmit="return confirm('All lab nodes will be stopped and left off. Create this backup?')"><input class="backup-name" name="name" maxlength="80" placeholder="e.g. Before firewall changes" required><button>Create backup</button><label class="backup-confirmation"><input type="checkbox" name="stop_confirmation" value="stop-and-backup" required><span>I understand all nodes will be stopped before the backup.</span></label></form></section>
-<section class="snapshots">
-  <div class="section-heading"><div><h2>Lab Backup</h2><p class="muted">{% if storage_scanned %}Backup storage: {{ snapshot_total_bytes | storage_size }}.{% else %}Refreshes GNS3 backup records. Configure local storage scanning to show sizes.{% endif %} Refresh never interrupts an active backup.</p></div><div class="backup-toolbar"><a class="button secondary" href="/projects/{{ project.project_id }}">↻ Refresh backups</a>{% if snapshots %}{% if can_share %}<details class="bulk-template"><summary>Make template</summary><div class="share-panel"><form id="selected-template-form" method="post"><p class="muted" data-template-selection>Select one backup.</p><label>Template name<input data-template-name name="name" maxlength="100" required disabled></label><label>Description<input name="description" maxlength="500" placeholder="Optional" disabled></label><button class="secondary" data-template-submit disabled>Publish template</button></form></div></details>{% endif %}<form id="bulk-backup-delete" method="post" action="/projects/{{ project.project_id }}/snapshots/delete" onsubmit="return confirm('Permanently delete every selected backup? This cannot be undone.')"><button class="danger" data-bulk-delete disabled>Delete selected</button></form>{% endif %}</div></div>
-  <div class="card snapshot-table-wrap"><table class="snapshot-table"><thead><tr><th><input type="checkbox" data-select-all aria-label="Select all backups"></th><th>No.</th><th>Backup name</th><th>Storage size</th><th>Completed at</th><th>Backup progress</th><th>Actions</th></tr></thead><tbody>
-  {% for snapshot in snapshots %}{% set size_bytes = snapshot.get('size_bytes') %}{% set template = snapshot_templates.get(snapshot.snapshot_id) %}<tr><td><input type="checkbox" form="bulk-backup-delete" name="snapshot_ids" value="{{ snapshot.snapshot_id }}" data-backup-select data-backup-name="{{ snapshot.name | default('Unnamed backup') }}" {% if template %}data-has-template="true"{% endif %} aria-label="Select {{ snapshot.name | default('backup') }}"></td><td>{{ loop.index }}</td><td title="ID: {{ snapshot.snapshot_id }}">{{ snapshot.name | default('Unnamed backup') }}</td><td>{% if size_bytes is not none %}{{ size_bytes | storage_size }}{% else %}<span class="muted">Not matched</span>{% endif %}</td><td><time class="local-time" datetime="{{ snapshot.completed_at | backup_datetime }}">—</time></td><td><span class="backup-complete" aria-label="Backup complete">✓</span></td><td class="actions"><a class="button secondary" href="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/download">Download</a><form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/restore" onsubmit="return confirm('Restore this backup? Current lab state will be replaced.')"><button class="secondary">Restore</button></form>{% if can_share %}<details class="backup-share"><summary title="Share backup">Share</summary><div class="share-panel"><form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/shares"><label for="backup-share-{{ loop.index }}">Share backup with username</label><input id="backup-share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Start typing a username" required><button class="secondary">Share backup</button></form>{% for username in snapshot_shared_with.get(snapshot.snapshot_id, []) %}<form class="shared-user" method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/shares/{{ username }}/remove"><span>{{ username }}</span><button class="link" title="Remove access">×</button></form>{% endfor %}{% if template %}<hr><p class="muted">Template: {{ template.name }}</p><form method="post" action="/templates/{{ template.template_id }}/access"><label for="template-share-{{ loop.index }}">Share template with</label><input id="template-share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Start typing a username" required><button class="secondary">Share template</button></form>{% for username in template_access.get(template.template_id, []) %}<form class="shared-user" method="post" action="/templates/{{ template.template_id }}/access/{{ username }}/remove"><span>{{ username }}</span><button class="link" title="Remove template access">×</button></form>{% endfor %}{% endif %}</div></details>{% endif %}</td></tr>
-  {% else %}<tr><td colspan="7">No backups yet.</td></tr>{% endfor %}
-  {% if backup_job_id %}<tr class="active-backup-row" data-backup-job-url="/projects/{{ project.project_id }}/backup-jobs/{{ backup_job_id }}" data-backup-cancel-url="/projects/{{ project.project_id }}/backup-jobs/{{ backup_job_id }}/cancel"><td></td><td>…</td><td data-backup-name>Backup in progress</td><td>—</td><td>In progress</td><td><button class="progress-ring" type="button" data-backup-cancel aria-label="Cancel backup" title="Cancel backup"><span data-backup-progress>0</span><span class="cancel-mark">×</span></button></td><td><span class="muted" data-backup-message>Checking status…</span></td></tr>{% endif %}
-  </tbody></table></div>
+{% set is_running = node_running > 0 %}
+{% set return_to = '/projects/' ~ project.project_id %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Labs</a> / {{ project.name }}</nav>
+<div class="page-head">
+  <div>
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:10px">
+      <h1>{{ project.name }}</h1>
+      {% if is_running %}<span class="pill ok">Running · {{ node_running }} of {{ node_total }} nodes</span>{% else %}<span class="pill off">Stopped</span>{% endif %}
+    </div>
+    <p class="subtitle">Owner {{ lab_owner or 'not assigned' }} · <span class="mono" title="Lab ID">{{ project.project_id }}</span></p>
+  </div>
+  <div class="actions">
+    {% if is_running %}
+    <form method="post" action="/projects/{{ project.project_id }}/stop" onsubmit="return confirm('Stop all running nodes in this lab?')"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="big">Stop lab</button></form>
+    {% else %}
+    <form method="post" action="/projects/{{ project.project_id }}/start" onsubmit="return confirm('Start all stopped nodes in this lab?')"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="big">Start lab</button></form>
+    {% endif %}
+    <a class="button big" href="#backups" data-open-tab="backups">Back up</a>
+    <a class="button primary big" target="_blank" rel="noopener" href="{{ access_lab_url }}">Open in GNS3<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (new tab)</span></a>
+  </div>
+</div>
+
+<div class="tabs" role="tablist" aria-label="Lab sections">
+  <button type="button" class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" data-tab="overview">Overview</button>
+  <button type="button" class="tab" role="tab" id="tab-backups" aria-controls="panel-backups" data-tab="backups">Backups ({{ snapshots | length }})</button>
+  {% if can_share %}<button type="button" class="tab" role="tab" id="tab-sharing" aria-controls="panel-sharing" data-tab="sharing">Sharing</button>{% endif %}
+  <button type="button" class="tab" role="tab" id="tab-settings" aria-controls="panel-settings" data-tab="settings">Settings</button>
+</div>
+
+<section id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" data-tab-panel="overview">
+  <div class="grid-2">
+    <div class="wide table-card">
+      <div class="card-head" style="padding:14px 16px 0"><h2>Nodes</h2><span class="muted">{{ node_total }} lab node{{ '' if node_total == 1 else 's' }}</span></div>
+      <table class="data responsive">
+        <thead><tr><th scope="col">Node</th><th scope="col">Type</th><th scope="col">State</th><th scope="col">Console</th></tr></thead>
+        <tbody>{% for node in nodes %}
+          <tr>
+            <td class="primary-cell"><span class="cell-title">{{ node.name }}</span></td>
+            <td data-label="Type">{{ (node.node_type or '') | replace('_', ' ') }}</td>
+            <td data-label="State">{% if node.node_type in ('cloud', 'ethernet_switch') %}<span class="pill off">Always on</span>{% elif node.status == 'started' %}<span class="pill ok">Started</span>{% elif node.status == 'suspended' %}<span class="pill warn">Suspended</span>{% else %}<span class="pill off">Stopped</span>{% endif %}</td>
+            <td data-label="Console" class="mono">{% if node.console %}{{ node.console_type or 'console' }} {{ node.console_host or '' }}:{{ node.console }}{% else %}—{% endif %}</td>
+          </tr>{% else %}
+          <tr><td class="empty" colspan="4">This lab has no nodes yet. Open it in GNS3 to build the topology.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="narrow">
+      <div class="card">
+        <h2>Latest backup</h2>
+        {% set latest = snapshots | last if snapshots else none %}
+        {% if latest %}
+        <p style="margin:0;font-weight:600">{{ latest.name | default('Unnamed backup') }}</p>
+        <p class="muted"><time class="local-time" datetime="{{ (latest.completed_at or latest.created_at) | backup_datetime }}">—</time>{% if latest.get('size_bytes') is not none %} · {{ latest.size_bytes | storage_size }}{% endif %}</p>
+        <a class="button" href="#backups" data-open-tab="backups">All backups</a>
+        {% else %}<p class="muted">No backups yet.</p><a class="button" href="#backups" data-open-tab="backups">Create the first backup</a>{% endif %}
+      </div>
+      {% if can_share %}
+      <div class="card">
+        <h2>Shared with</h2>
+        <p class="muted">{% if lab_shared_with %}{{ lab_shared_with | join(', ') }}{% else %}Nobody yet.{% endif %}</p>
+        <a class="button" href="#sharing" data-open-tab="sharing">Manage sharing</a>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section id="panel-backups" role="tabpanel" aria-labelledby="tab-backups" data-tab-panel="backups">
+  <div style="display:flex;flex-direction:column;gap:16px">
+  <div class="card">
+    <h2>Create a backup</h2>
+    <form class="form-stack" style="max-width:none" method="post" action="/projects/{{ project.project_id }}/snapshots" onsubmit="return confirm('All lab nodes will be stopped and left off. Create this backup?')">
+      <div class="form-row"><label>Backup name<input class="backup-name" name="name" maxlength="80" placeholder="e.g. Before firewall changes" required></label><button class="primary big">Stop nodes and back up</button></div>
+      <label class="inline-check"><input type="checkbox" name="stop_confirmation" value="stop-and-backup" required><span>I understand every running node is stopped first and stays off afterwards.</span></label>
+    </form>
+  </div>
+
+  <div class="toolbar">
+    <p class="muted" style="margin:0">{% if storage_scanned %}Backup storage used: {{ snapshot_total_bytes | storage_size }}.{% else %}Sizes appear when the portal can read the GNS3 projects folder.{% endif %}</p>
+    <div class="row-actions">
+      <a class="button" href="/projects/{{ project.project_id }}#backups">Refresh</a>
+      {% if snapshots and can_share %}
+      <details class="menu">
+        <summary class="button">Make template</summary>
+        <div class="menu-panel wide">
+          <form id="selected-template-form" method="post" class="form-stack">
+            <p class="muted" data-template-selection>Select one backup.</p>
+            <label>Template name<input data-template-name name="name" maxlength="100" required disabled></label>
+            <label>Description<input name="description" maxlength="500" placeholder="Optional" disabled></label>
+            <button class="primary" data-template-submit disabled>{% if has_admin_scope %}Publish template{% else %}Submit for approval{% endif %}</button>
+          </form>
+        </div>
+      </details>
+      {% endif %}
+      {% if snapshots %}<form id="bulk-backup-delete" method="post" action="/projects/{{ project.project_id }}/snapshots/delete" onsubmit="return confirm('Permanently delete every selected backup? This cannot be undone.')"><button class="danger" data-bulk-delete disabled>Delete selected</button></form>{% endif %}
+    </div>
+  </div>
+
+  <div class="table-card">
+    <table class="data responsive">
+      <thead><tr><th scope="col" style="width:40px"><input type="checkbox" data-select-all aria-label="Select all backups"></th><th scope="col">Backup</th><th scope="col">Created</th><th scope="col">Size</th><th scope="col">Status</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+      <tbody>
+      {% for snapshot in snapshots %}{% set size_bytes = snapshot.get('size_bytes') %}{% set template = snapshot_templates.get(snapshot.snapshot_id) %}
+        <tr>
+          <td data-label="Select"><input type="checkbox" form="bulk-backup-delete" name="snapshot_ids" value="{{ snapshot.snapshot_id }}" data-backup-select data-backup-name="{{ snapshot.name | default('Unnamed backup') }}" {% if template %}data-has-template="true"{% endif %} aria-label="Select {{ snapshot.name | default('backup') }}"></td>
+          <td class="primary-cell" title="ID: {{ snapshot.snapshot_id }}"><span class="cell-title">{{ snapshot.name | default('Unnamed backup') }}</span>{% if template %}<div class="cell-meta">Template: {{ template.name }}{% if template.approval_status == 'pending' %} (awaiting approval){% endif %}</div>{% endif %}</td>
+          <td data-label="Created"><time class="local-time" datetime="{{ (snapshot.completed_at or snapshot.created_at) | backup_datetime }}">—</time></td>
+          <td data-label="Size">{% if size_bytes is not none %}{{ size_bytes | storage_size }}{% else %}<span class="muted">Unknown</span>{% endif %}</td>
+          <td data-label="Status"><span class="pill ok">Complete</span></td>
+          <td class="actions"><div class="row-actions">
+            <form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/restore" onsubmit="return confirm('Restore this backup? The current lab state will be replaced.')"><button>Restore</button></form>
+            <details class="menu">
+              <summary class="button icon-button" aria-label="More actions for {{ snapshot.name | default('backup') }}">⋯</summary>
+              <div class="menu-panel wide">
+                <div class="menu-section">
+                  <a class="menu-item" href="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/download">Download backup file</a>
+                  <form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/clone"><label class="visually-hidden" for="clone-{{ loop.index }}">Name for the new lab</label><input id="clone-{{ loop.index }}" name="name" maxlength="80" placeholder="New lab from this backup" required><button>Create</button></form>
+                </div>
+                {% if can_share %}
+                <div class="menu-section">
+                  <h3>Share this backup once</h3>
+                  <form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/shares"><label class="visually-hidden" for="backup-share-{{ loop.index }}">Username</label><input id="backup-share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Username" required><button>Share</button></form>
+                  {% for username in snapshot_shared_with.get(snapshot.snapshot_id, []) %}
+                  <form class="shared-user" method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/shares/{{ username }}/remove"><span>{{ username }}</span><button class="link">Remove</button></form>
+                  {% endfor %}
+                </div>
+                {% if template %}
+                <div class="menu-section">
+                  <h3>Template access</h3>
+                  <form method="post" action="/templates/{{ template.template_id }}/access"><label class="visually-hidden" for="template-share-{{ loop.index }}">Username</label><input id="template-share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Username" required><button>Grant</button></form>
+                  {% for username in template_access.get(template.template_id, []) %}
+                  <form class="shared-user" method="post" action="/templates/{{ template.template_id }}/access/{{ username }}/remove"><span>{{ username }}</span><button class="link">Remove</button></form>
+                  {% endfor %}
+                </div>
+                {% endif %}
+                {% endif %}
+              </div>
+            </details>
+          </div></td>
+        </tr>
+      {% else %}
+        <tr><td class="empty" colspan="6">No backups yet.</td></tr>
+      {% endfor %}
+      {% if backup_job_id %}
+        <tr class="active-backup-row" data-backup-job-url="/projects/{{ project.project_id }}/backup-jobs/{{ backup_job_id }}" data-backup-cancel-url="/projects/{{ project.project_id }}/backup-jobs/{{ backup_job_id }}/cancel">
+          <td></td>
+          <td class="primary-cell"><span class="cell-title" data-backup-name>Backup in progress</span><div class="cell-meta" data-backup-message>Checking status…</div></td>
+          <td data-label="Created">In progress</td>
+          <td data-label="Size">—</td>
+          <td data-label="Status"><button class="progress-ring" type="button" data-backup-cancel aria-label="Cancel backup" title="Cancel backup"><span data-backup-progress>0</span><span class="cancel-mark">×</span></button></td>
+          <td></td>
+        </tr>
+      {% endif %}
+      </tbody>
+    </table>
+  </div>
+  </div>
+</section>
+
+{% if can_share %}
+<section id="panel-sharing" role="tabpanel" aria-labelledby="tab-sharing" data-tab-panel="sharing">
+  <div class="card form-stack">
+    <h2>Share this lab</h2>
+    <p class="muted" style="margin:0">People you share with can open, start and stop the lab. They cannot delete it or share it further.</p>
+    <form class="form-row" method="post" action="/projects/{{ project.project_id }}/shares"><input type="hidden" name="return_to" value="{{ return_to }}#sharing"><label>Username<input name="username" list="shareable-users" autocomplete="off" required></label><button class="primary big">Share</button></form>
+    {% if lab_shared_with %}
+    <div>{% for username in lab_shared_with %}<form class="shared-user" method="post" action="/projects/{{ project.project_id }}/shares/{{ username }}/remove" style="padding:8px 0;border-top:1px solid var(--line)"><input type="hidden" name="return_to" value="{{ return_to }}#sharing"><span>{{ username }}</span><button class="link">Remove access</button></form>{% endfor %}</div>
+    {% else %}<p class="muted">Not shared with anyone.</p>{% endif %}
+  </div>
+</section>
+{% endif %}
+
+<section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-tab-panel="settings">
+  <div style="display:flex;flex-direction:column;gap:16px">
+  <div class="card form-stack">
+    <h2>Rename</h2>
+    <form class="form-row" method="post" action="/projects/{{ project.project_id }}/rename"><input type="hidden" name="return_to" value="{{ return_to }}#settings"><label>Lab name<input name="name" maxlength="80" value="{{ project.name }}" required></label><button class="big">Save name</button></form>
+  </div>
+  <div class="card">
+    <h2>Export</h2>
+    <p class="muted">Download a portable GNS3 project archive. Importing it elsewhere needs the same appliance images on that GNS3 server.</p>
+    <a class="button" href="/projects/{{ project.project_id }}/export">Download portable lab</a>
+  </div>
+  <div class="card danger-zone">
+    <h2>Delete this lab</h2>
+    <form class="form-stack" method="post" action="/projects/{{ project.project_id }}/delete" onsubmit="return confirm('This permanently deletes the lab. Continue?')">
+      {% if snapshots %}<fieldset><legend>Keep backups in your archive ({{ retained_remaining }} of {{ retained_limit }} slots free)</legend>{% for snapshot in snapshots %}<label class="inline-check"><input type="checkbox" name="retained_snapshot_ids" value="{{ snapshot.snapshot_id }}" {% if retained_remaining == 0 %}disabled{% endif %}> {{ snapshot.name | default('Unnamed backup') }}</label>{% endfor %}</fieldset>{% endif %}
+      <label>Type <strong style="color:var(--ink)">{{ project.name }}</strong> to confirm<input name="confirmation" autocomplete="off" required></label>
+      <div><button class="danger solid big">Delete lab</button></div>
+    </form>
+  </div>
+  </div>
 </section>
 <datalist id="shareable-users">{% for account in portal_users if account.username != lab_owner %}<option value="{{ account.username }}">{% endfor %}</datalist>
-<section class="danger-zone"><h2>Delete this lab</h2><div class="card"><p>Type <strong>{{ project.name }}</strong> to permanently delete the lab and its controller data.</p><form method="post" action="/projects/{{ project.project_id }}/delete" onsubmit="return confirm('This permanently deletes the lab. Continue?')"><input name="confirmation" placeholder="Type the lab name exactly" required>{% if snapshots %}<fieldset class="retain-select"><legend>Retain selected backups ({{ retained_remaining }} of {{ retained_limit }} archive slots available)</legend>{% for snapshot in snapshots %}<label class="inline-check"><input type="checkbox" name="retained_snapshot_ids" value="{{ snapshot.snapshot_id }}" {% if retained_remaining == 0 %}disabled{% endif %}> {{ snapshot.name | default('Unnamed backup') }}</label>{% endfor %}</fieldset>{% endif %}<button class="danger">Delete lab</button></form></div></section>
 {% endblock %}
-{% block scripts %}<script>(()=>{const all=document.querySelector('[data-select-all]'),checks=[...document.querySelectorAll('[data-backup-select]')],remove=document.querySelector('[data-bulk-delete]'),templateForm=document.querySelector('#selected-template-form'),templateName=document.querySelector('[data-template-name]'),templateSubmit=document.querySelector('[data-template-submit]'),templateSelection=document.querySelector('[data-template-selection]');function update(){const chosen=checks.filter(item=>item.checked);if(all){all.checked=checks.length>0&&chosen.length===checks.length;all.indeterminate=chosen.length>0&&chosen.length<checks.length}if(remove)remove.disabled=chosen.length===0;if(!templateForm)return;const one=chosen.length===1&&!chosen[0].dataset.hasTemplate;templateForm.action=one?`/projects/{{ project.project_id }}/snapshots/${chosen[0].value}/template`:'';templateName.disabled=!one;templateSubmit.disabled=!one;templateForm.querySelector('[name=description]').disabled=!one;if(one){templateSelection.textContent=`Selected backup: ${chosen[0].dataset.backupName}`;templateName.value=chosen[0].dataset.backupName}else if(chosen.length===1){templateSelection.textContent='This backup is already a published template.';templateName.value=''}else{templateSelection.textContent='Select exactly one backup to make a template.';templateName.value=''}}all?.addEventListener('change',()=>{checks.forEach(item=>item.checked=all.checked);update()});checks.forEach(item=>item.addEventListener('change',update));update()})();</script>{% if backup_job_id %}<script>(() => {const row=document.querySelector('[data-backup-job-url]'),message=document.querySelector('[data-backup-message]'),progress=document.querySelector('[data-backup-progress]'),name=document.querySelector('[data-backup-name]'),cancel=document.querySelector('[data-backup-cancel]');let cancelling=false;function render(job){const percent=Math.max(0,Math.min(100,Number(job.progress_percent)||0));row.style.setProperty('--backup-progress',`${percent * 3.6}deg`);progress.textContent=`${percent}%`;name.textContent=job.name||'Backup in progress';message.textContent=`${job.progress_is_estimated?'Estimated ':''}${percent}% — ${job.message}`;if(job.status==='completed'||job.status==='cancelled'||job.status==='failed'){cancel.remove();setTimeout(()=>window.location.replace(window.location.pathname),1500);return true}return false}async function poll(){try{const response=await fetch(row.dataset.backupJobUrl,{cache:'no-store'}),job=await response.json();if(!response.ok)throw new Error(job.detail||'Unable to check backup status.');if(!render(job))setTimeout(poll,5000)}catch(error){message.textContent='Status check interrupted. The backup may still be running; refresh to check again.'}}cancel.addEventListener('click',async()=>{if(cancelling)return;cancelling=true;cancel.disabled=true;message.textContent='Requesting safe cancellation…';try{const response=await fetch(row.dataset.backupCancelUrl,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'}});if(!response.ok){const detail=await response.json();throw new Error(detail.detail||'Cancellation failed.')} }catch(error){message.textContent=error.message;cancel.disabled=false;cancelling=false;}});poll()})();</script>{% endif %}{% endblock %}
+{% block scripts %}<script>
+(()=>{const tabs=[...document.querySelectorAll('[data-tab]')],panels=[...document.querySelectorAll('[data-tab-panel]')];const fallback='{{ "backups" if backup_job_id else "overview" }}';
+function show(name,focus){if(!tabs.some(tab=>tab.dataset.tab===name))name='overview';tabs.forEach(tab=>{const on=tab.dataset.tab===name;tab.setAttribute('aria-selected',String(on));tab.tabIndex=on?0:-1;if(on&&focus)tab.focus()});panels.forEach(panel=>panel.hidden=panel.dataset.tabPanel!==name)}
+tabs.forEach((tab,index)=>{tab.addEventListener('click',()=>{history.replaceState(null,'','#'+tab.dataset.tab);show(tab.dataset.tab)});tab.addEventListener('keydown',event=>{const step=event.key==='ArrowRight'?1:event.key==='ArrowLeft'?-1:0;if(step){const next=tabs[(index+step+tabs.length)%tabs.length];history.replaceState(null,'','#'+next.dataset.tab);show(next.dataset.tab,true)}})});
+document.querySelectorAll('[data-open-tab]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();history.replaceState(null,'','#'+link.dataset.openTab);show(link.dataset.openTab);document.querySelector('.tabs').scrollIntoView({block:'start'});if(link.dataset.openTab==='backups')document.querySelector('.backup-name')?.focus()}));
+show(location.hash.slice(1)||fallback)})();
+(()=>{const all=document.querySelector('[data-select-all]'),checks=[...document.querySelectorAll('[data-backup-select]')],remove=document.querySelector('[data-bulk-delete]'),templateForm=document.querySelector('#selected-template-form'),templateName=document.querySelector('[data-template-name]'),templateSubmit=document.querySelector('[data-template-submit]'),templateSelection=document.querySelector('[data-template-selection]');function update(){const chosen=checks.filter(item=>item.checked);if(all){all.checked=checks.length>0&&chosen.length===checks.length;all.indeterminate=chosen.length>0&&chosen.length<checks.length}if(remove){remove.disabled=chosen.length===0;remove.textContent=chosen.length?`Delete ${chosen.length} selected`:'Delete selected'}if(!templateForm)return;const one=chosen.length===1&&!chosen[0].dataset.hasTemplate;templateForm.action=one?`/projects/{{ project.project_id }}/snapshots/${chosen[0].value}/template`:'';templateName.disabled=!one;templateSubmit.disabled=!one;templateForm.querySelector('[name=description]').disabled=!one;if(one){templateSelection.textContent=`Selected backup: ${chosen[0].dataset.backupName}`;templateName.value=chosen[0].dataset.backupName}else if(chosen.length===1){templateSelection.textContent='This backup is already a template.';templateName.value=''}else{templateSelection.textContent='Select exactly one backup in the table to make a template.';templateName.value=''}}all?.addEventListener('change',()=>{checks.forEach(item=>item.checked=all.checked);update()});checks.forEach(item=>item.addEventListener('change',update));update()})();
+</script>{% if backup_job_id %}<script>
+(() => {const row=document.querySelector('[data-backup-job-url]'),message=document.querySelector('[data-backup-message]'),progress=document.querySelector('[data-backup-progress]'),name=document.querySelector('[data-backup-name]'),cancel=document.querySelector('[data-backup-cancel]');let cancelling=false;function render(job){const percent=Math.max(0,Math.min(100,Number(job.progress_percent)||0));row.style.setProperty('--backup-progress',`${percent * 3.6}deg`);progress.textContent=`${percent}%`;name.textContent=job.name||'Backup in progress';message.textContent=`${job.progress_is_estimated?'Estimated ':''}${percent}% — ${job.message}`;if(job.status==='completed'||job.status==='cancelled'||job.status==='failed'){cancel.remove();setTimeout(()=>window.location.replace(window.location.pathname+'#backups'),1500);return true}return false}async function poll(){try{const response=await fetch(row.dataset.backupJobUrl,{cache:'no-store'}),job=await response.json();if(!response.ok)throw new Error(job.detail||'Unable to check backup status.');if(!render(job))setTimeout(poll,5000)}catch(error){message.textContent='Status check interrupted. The backup may still be running; refresh to check again.'}}cancel.addEventListener('click',async()=>{if(cancelling)return;cancelling=true;cancel.disabled=true;message.textContent='Requesting safe cancellation…';try{const response=await fetch(row.dataset.backupCancelUrl,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'}});if(!response.ok){const detail=await response.json();throw new Error(detail.detail||'Cancellation failed.')} }catch(error){message.textContent=error.message;cancel.disabled=false;cancelling=false;}});poll()})();
+</script>{% endif %}{% endblock %}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Templates · GNS3 Lab Portal{% endblock %}
+{% block content %}
+{% set admin_view = is_admin and not impersonating %}
+<div class="page-head">
+  <div>
+    <h1>Templates</h1>
+    <p class="subtitle">Approved lab templates anyone can start from. Turn a backup into a template from the lab's Backups tab.</p>
+  </div>
+</div>
+
+{% if pending_templates %}
+<section class="table-card" aria-labelledby="pending-heading">
+  <div class="card-head" style="padding:14px 16px 0"><h2 id="pending-heading">{% if admin_view %}Waiting for your approval{% else %}Your templates waiting for approval{% endif %}</h2></div>
+  <table class="data responsive">
+    <thead><tr><th scope="col">Template</th><th scope="col">Submitted by</th><th scope="col">Submitted</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>{% for template in pending_templates %}
+      <tr>
+        <td class="primary-cell"><div class="cell-title">{{ template.name }}</div>{% if template.description %}<div class="cell-meta">{{ template.description }}</div>{% endif %}</td>
+        <td data-label="Submitted by">{{ template.owner }}</td>
+        <td data-label="Submitted"><time class="local-time" datetime="{{ template.created_at }}">—</time></td>
+        <td class="actions"><div class="row-actions">
+          {% if admin_view %}<form method="post" action="/templates/{{ template.template_id }}/approve" onsubmit="return confirm('Approve and publish this template for every portal user?')"><button class="primary">Approve</button></form>{% endif %}
+          <form method="post" action="/templates/{{ template.template_id }}/unpublish" onsubmit="return confirm('Remove this template and its archived copy?')"><button class="danger">{% if admin_view %}Reject{% else %}Withdraw{% endif %}</button></form>
+        </div></td>
+      </tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="table-card" aria-labelledby="catalog-heading">
+  <div class="card-head" style="padding:14px 16px 0"><h2 id="catalog-heading">Catalog</h2></div>
+  <table class="data responsive">
+    <thead><tr><th scope="col">Template</th><th scope="col">Created by</th><th scope="col">Size</th><th scope="col">Published</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>{% for template in available_templates %}
+      <tr>
+        <td class="primary-cell"><div class="cell-title">{{ template.name }}</div>{% if template.description %}<div class="cell-meta">{{ template.description }}</div>{% endif %}</td>
+        <td data-label="Created by">{{ template.owner }}</td>
+        <td data-label="Size">{% if template.size_bytes %}{{ template.size_bytes | storage_size }}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td data-label="Published"><time class="local-time" datetime="{{ template.approved_at or template.created_at }}">—</time></td>
+        <td class="actions"><div class="row-actions">
+          <a class="button primary" href="/labs/new?template={{ template.template_id }}">Use template</a>
+          {% if template.owner == user or admin_view %}<form method="post" action="/templates/{{ template.template_id }}/unpublish" onsubmit="return confirm('Unpublish this template? Its archived copy is removed.')"><button class="danger">Unpublish</button></form>{% endif %}
+        </div></td>
+      </tr>{% else %}
+      <tr><td class="empty" colspan="5">No templates have been published yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}New lab · GNS3 Lab Portal{% endblock %}
+{% block content %}
+{% set chosen_template = request.query_params.get('template', '') %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Labs</a> / New lab</nav>
+<div class="page-head">
+  <div>
+    <h1>New lab</h1>
+    <p class="subtitle">Start empty, from an approved template, or from a backup. Labs made from backups are separate copies and start powered off.</p>
+  </div>
+</div>
+
+<div class="option-cards" role="radiogroup" aria-label="How to start the new lab">
+  <label class="option-card"><input type="radio" name="create-mode" value="blank" {% if not chosen_template %}checked{% endif %}><span><strong>Empty lab</strong><small>A blank topology to build yourself.</small></span></label>
+  <label class="option-card"><input type="radio" name="create-mode" value="template" {% if chosen_template %}checked{% endif %}><span><strong>From a template</strong><small>{{ available_templates | length }} approved template{{ '' if available_templates | length == 1 else 's' }}.</small></span></label>
+  <label class="option-card"><input type="radio" name="create-mode" value="backup"><span><strong>From a backup</strong><small>A backup already on the portal.</small></span></label>
+  <label class="option-card"><input type="radio" name="create-mode" value="upload"><span><strong>Upload a backup file</strong><small>.gns3snapshot or .gns3project</small></span></label>
+</div>
+
+<section class="card" data-create-panel="blank">
+  <h2>Empty lab</h2>
+  <form class="form-row" method="post" action="/projects">
+    <label>Lab name<input name="name" maxlength="80" placeholder="e.g. Branch routing lab" required></label>
+    <button class="primary big">Create lab</button>
+  </form>
+</section>
+
+<section class="card" data-create-panel="template" hidden>
+  <h2>From a template</h2>
+  {% if available_templates %}
+  <form class="form-stack" method="post" action="/template-imports">
+    <label>Template<select name="template_id">{% for template in available_templates %}<option value="{{ template.template_id }}" {% if template.template_id == chosen_template %}selected{% endif %}>{{ template.name }}{% if template.description %} · {{ template.description }}{% endif %}</option>{% endfor %}</select></label>
+    <label>Name for the new lab<input name="name" maxlength="80" required></label>
+    <div><button class="primary big">Create lab from template</button></div>
+  </form>
+  <p class="muted">Each new lab is fully owned by you. <a href="/templates">Browse templates</a></p>
+  {% else %}<p class="muted">No approved templates yet. Any lab owner can turn a backup into a template from the lab's Backups tab.</p>{% endif %}
+</section>
+
+<section class="card" data-create-panel="backup" hidden>
+  <h2>From a backup on the portal</h2>
+  {% if import_sources %}
+  <form class="form-stack" method="post" action="/backup-imports" onsubmit="return confirm('Create a separate, powered-off lab from the selected backup?')">
+    <label>Lab<select name="source_project_id" id="source-project" required>{% for source in import_sources %}<option value="{{ source.project_id }}">{{ source.project_name }}</option>{% endfor %}</select></label>
+    <label>Backup<select name="snapshot_id" id="source-snapshot" required>{% for source in import_sources %}{% for snapshot in source.snapshots %}<option value="{{ snapshot.snapshot_id }}" data-project="{{ source.project_id }}">{{ snapshot.name | default('Unnamed backup') }}</option>{% endfor %}{% endfor %}</select></label>
+    <label>Name for the new lab<input name="name" maxlength="80" required></label>
+    <div><button class="primary big">Create lab from backup</button></div>
+  </form>
+  {% else %}<p class="muted">None of your labs has a backup yet.</p>{% endif %}
+
+  {% if shared_backup_sources %}
+  <hr>
+  <h3>Backups shared with you</h3>
+  <p class="muted">Each shared backup can create one new lab, then it leaves this list.</p>
+  <form class="form-stack" method="post" action="/shared-backup-imports">
+    <label>Shared lab<select name="source_project_id" id="shared-source-project">{% for backup in shared_backup_sources %}<option value="{{ backup.project_id }}">{{ backup.project_name }}</option>{% endfor %}</select></label>
+    <label>Backup<select name="snapshot_id" id="shared-snapshot">{% for backup in shared_backup_sources %}<option value="{{ backup.snapshot_id }}" data-project="{{ backup.project_id }}">{{ backup.snapshot_name }}</option>{% endfor %}</select></label>
+    <label>Name for the new lab<input name="name" maxlength="80" required></label>
+    <div><button class="primary big">Create lab from shared backup</button></div>
+  </form>
+  {% endif %}
+
+  {% if retained_backups %}
+  <hr>
+  <h3>Retained backups from deleted labs</h3>
+  <form class="form-stack" method="post" action="/retained-backup-imports">
+    <label>Backup<select name="backup_id">{% for backup in retained_backups %}<option value="{{ backup.backup_id }}">{{ backup.source_lab_name }} — {{ backup.backup_name }} ({{ backup.size_bytes | storage_size }})</option>{% endfor %}</select></label>
+    <label>Name for the new lab<input name="name" maxlength="80" required></label>
+    <div><button class="primary big">Create lab from retained backup</button></div>
+  </form>
+  {% endif %}
+</section>
+
+<section class="card" data-create-panel="upload" hidden>
+  <h2>Upload a backup file</h2>
+  <form class="form-stack" method="post" action="/backup-uploads" enctype="multipart/form-data" onsubmit="return confirm('Upload this backup and create a separate powered-off lab?')">
+    <label>Backup file<input type="file" name="backup_file" accept=".gns3snapshot,.gns3project" required></label>
+    <label>Name for the new lab<input name="name" maxlength="80" required></label>
+    <div><button class="primary big">Upload and create lab</button></div>
+  </form>
+  <p class="muted">Accepted formats: <code>.gns3snapshot</code> and <code>.gns3project</code>.</p>
+</section>
+{% endblock %}
+{% block scripts %}<script>
+(()=>{function updateMode(){const mode=document.querySelector('input[name="create-mode"]:checked')?.value||'blank';document.querySelectorAll('[data-create-panel]').forEach(panel=>panel.hidden=panel.dataset.createPanel!==mode);document.querySelectorAll('input[name="create-mode"]').forEach(input=>input.closest('label').classList.toggle('selected',input.checked))}
+function linkSnapshots(project,snapshot){if(!project||!snapshot)return;const update=()=>{let first=null;for(const option of snapshot.options){const visible=option.dataset.project===project.value;option.hidden=!visible;option.disabled=!visible;if(visible&&!first)first=option}if(first)snapshot.value=first.value};project.addEventListener('change',update);update()}
+document.querySelectorAll('input[name="create-mode"]').forEach(input=>input.addEventListener('change',updateMode));updateMode();
+linkSnapshots(document.querySelector('#source-project'),document.querySelector('#source-snapshot'));linkSnapshots(document.querySelector('#shared-source-project'),document.querySelector('#shared-snapshot'))})();
+</script>{% endblock %}

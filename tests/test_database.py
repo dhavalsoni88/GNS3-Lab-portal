@@ -172,6 +172,12 @@ def test_dashboard_and_lab_sharing_with_stub_gns3(client):
         system_status = client.get("/admin/system-status").json()
         assert system_status["cpu_percent"] == 12.5 and system_status["memory_percent"] == 68.2
         assert client.get("/admin/users").status_code == 200
+        for path in ("/labs/new", "/templates", "/activity", "/admin/status", "/profile", "/projects/project-1"):
+            assert client.get(path).status_code == 200, path
+        back = client.post("/projects/project-1/rename", data={"name": "Lab One", "return_to": "/projects/project-1#settings"}, follow_redirects=False)
+        assert back.headers["location"].startswith("/projects/project-1?message=") and back.headers["location"].endswith("#settings")
+        elsewhere = client.post("/projects/project-1/shares/Alice/remove", data={"return_to": "https://evil.example/"}, follow_redirects=False)
+        assert elsewhere.headers["location"].startswith("/?")
         client.post("/logout")
     finally:
         portal.app.state.gns3_client = original

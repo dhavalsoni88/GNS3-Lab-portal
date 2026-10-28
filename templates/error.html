@@ -1,1 +1,10 @@
-{% extends "base.html" %}{% block content %}<section class="card error-page"><p class="eyebrow">Error {{ status }}</p><h1>GNS3 connection problem</h1><p>{{ message }}</p><a class="button" href="/">Return to dashboard</a></section>{% endblock %}
+{% extends "base.html" %}
+{% block title %}Problem · GNS3 Lab Portal{% endblock %}
+{% block content %}
+<section class="card form-stack" style="max-width:640px">
+  <p class="muted" style="margin:0">Error {{ status }}</p>
+  <h1>{% if status in (502, 503, 504) %}The GNS3 server is not responding{% else %}Something went wrong{% endif %}</h1>
+  <p style="margin:0">{{ message }}</p>
+  <div><a class="button primary" href="/">Back to labs</a></div>
+</section>
+{% endblock %}

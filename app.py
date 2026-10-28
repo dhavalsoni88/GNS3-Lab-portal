@@ -868,8 +868,11 @@ def format_backup_datetime(value: Any) -> str:
     if not value:
         return "—"
     try:
+        # GNS3 v2 reports snapshot created_at as Unix epoch seconds.
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            return datetime.fromtimestamp(float(value), timezone.utc).isoformat()
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc).isoformat()
-    except ValueError:
+    except (ValueError, OverflowError, OSError):
         return str(value)
 
 
@@ -1149,7 +1152,12 @@ async def run_backup_job(job: dict[str, Any]) -> None:
 
 
 def error_page(request: Request, exc: HTTPException) -> HTMLResponse:
-    return templates.TemplateResponse(request, "error.html", {"message": str(exc.detail), "status": exc.status_code}, status_code=exc.status_code)
+    context: dict[str, Any] = {"message": str(exc.detail), "status": exc.status_code}
+    try:
+        context.update(base_context(request))
+    except HTTPException:
+        pass  # Not signed in: show the error without account details.
+    return templates.TemplateResponse(request, "error.html", context, status_code=exc.status_code)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -1276,6 +1284,7 @@ async def admin_users(request: Request):
     return templates.TemplateResponse(request, "admin_users.html", {
         "users": list_users(), "user": current_user(request), "signed_in_user": signed_in_user(request),
         "is_admin": True, "can_manage_users": True, "impersonating": request.session.get("impersonating", ""),
+        "active_nav": "users", "has_admin_scope": has_admin_scope(request),
     })
 
 
@@ -1350,29 +1359,29 @@ async def admin_set_lab_owner(request: Request, project_id: str, username: str =
 
 
 @app.post("/projects/{project_id}/shares")
-async def share_lab(request: Request, project_id: str, username: str = Form(...)):
+async def share_lab(request: Request, project_id: str, username: str = Form(...), return_to: str = Form("")):
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can share this lab.")
     target = user_record(username)
     owner = lab_owner(project_id)
     if not target or not target.get("enabled") or target["username"] == owner:
-        return RedirectResponse("/?error=Choose+another+enabled+portal+user", status_code=303)
+        return redirect_back(return_to, project_id, "error=Choose+another+enabled+portal+user")
     with db.connect() as connection:
         connection.execute("INSERT INTO lab_shares(project_id,username,shared_by,shared_at) VALUES(?,?,?,?) ON CONFLICT(project_id,username) DO UPDATE SET shared_by=excluded.shared_by, shared_at=excluded.shared_at", (project_id, target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "share_lab", project_id, {"shared_with": target["username"]})
-    return RedirectResponse("/?message=Lab+shared", status_code=303)
+    return redirect_back(return_to, project_id, "message=Lab+shared")
 
 
 @app.post("/projects/{project_id}/shares/{username}/remove")
-async def remove_lab_share(request: Request, project_id: str, username: str):
+async def remove_lab_share(request: Request, project_id: str, username: str, return_to: str = Form("")):
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can change sharing.")
     with db.connect() as connection:
         connection.execute("DELETE FROM lab_shares WHERE project_id=? AND username=?", (project_id, username))
     audit(audit_actor(request), "remove_lab_share", project_id, {"user": username})
-    return RedirectResponse("/?message=Lab+sharing+updated", status_code=303)
+    return redirect_back(return_to, project_id, "message=Lab+sharing+updated")
 
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/shares")
@@ -1482,7 +1491,7 @@ async def unpublish_template(request: Request, template_id: str):
     except (OSError, ValueError):
         pass
     audit(audit_actor(request), "unpublish_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"]})
-    return RedirectResponse("/?message=Lab+template+unpublished", status_code=303)
+    return RedirectResponse("/templates?message=Lab+template+unpublished", status_code=303)
 
 
 @app.post("/templates/{template_id}/approve")
@@ -1492,17 +1501,73 @@ async def approve_template(request: Request, template_id: str):
     if not template:
         raise HTTPException(404, "Lab template not found.")
     if template.get("approval_status") == "approved":
-        return RedirectResponse("/?message=Lab+template+is+already+approved", status_code=303)
+        return RedirectResponse("/templates?message=Lab+template+is+already+approved", status_code=303)
     with db.connect() as connection:
         connection.execute("UPDATE lab_templates SET approval_status='approved',approved_by=?,approved_at=? WHERE template_id=?", (audit_actor(request), datetime.now(timezone.utc).isoformat(), template_id))
     audit(audit_actor(request), "approve_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"], "owner": template["owner"]})
-    return RedirectResponse("/?message=Lab+template+approved+and+published", status_code=303)
+    return RedirectResponse("/templates?message=Lab+template+approved+and+published", status_code=303)
+
+
+def base_context(request: Request, active_nav: str = "") -> dict[str, Any]:
+    """Values every page in the console layout needs."""
+    return {
+        "user": current_user(request), "signed_in_user": signed_in_user(request),
+        "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
+        "has_admin_scope": has_admin_scope(request), "active_nav": active_nav,
+        "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
+    context = await lab_overview(request)
+    if not isinstance(context, dict):
+        return context
+    return templates.TemplateResponse(request, "dashboard.html", {**context, "active_nav": "labs"})
+
+
+@app.get("/labs/new", response_class=HTMLResponse)
+async def new_lab_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    context = await lab_overview(request)
+    if not isinstance(context, dict):
+        return context
+    return templates.TemplateResponse(request, "new_lab.html", {**context, "active_nav": "new_lab"})
+
+
+@app.get("/templates", response_class=HTMLResponse)
+async def templates_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    context = await lab_overview(request)
+    if not isinstance(context, dict):
+        return context
+    return templates.TemplateResponse(request, "templates.html", {**context, "active_nav": "templates"})
+
+
+@app.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    context = base_context(request, "activity")
+    context["audit"] = recent_audit(limit=500, username=current_user(request), include_all=has_admin_scope(request))
+    return templates.TemplateResponse(request, "activity.html", context)
+
+
+@app.get("/admin/status", response_class=HTMLResponse)
+async def server_status_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    if AUTH_ENABLED and not has_admin_scope(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access is required.")
+    return templates.TemplateResponse(request, "server_status.html", base_context(request, "status"))
+
+
+async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
+    """Collect labs, backups and templates for the labs, new-lab and templates pages."""
     try:
         projects = await gns3("GET", "/v2/projects")
         # Keep the dashboard stable: older labs stay at the top and each new
@@ -1557,17 +1622,20 @@ async def dashboard(request: Request):
     # The dashboard action is deliberately derived from node state, rather
     # than project open/closed state. Built-in Cloud and Ethernet switch nodes
     # are always reported as started by GNS3 and are not lab workloads.
-    for project, nodes in zip(projects, node_lists):
-        project["is_running"] = any(
-            not is_non_stoppable_node(node) and node.get("status") != "stopped"
-            for node in nodes
-        )
+    for project, nodes, snapshots in zip(projects, node_lists, snapshot_lists):
+        workload_nodes = [node for node in nodes if not is_non_stoppable_node(node)]
+        project["node_total"] = len(workload_nodes)
+        project["node_running"] = sum(1 for node in workload_nodes if node.get("status") != "stopped")
+        project["is_running"] = project["node_running"] > 0
+        project["backup_count"] = len(snapshots)
+        backup_times = [format_backup_datetime(item.get("created_at")) for item in snapshots if item.get("created_at")]
+        project["last_backup_at"] = max((value for value in backup_times if value[:1].isdigit()), default="")
         project["access_lab_url"] = gns3_webui_project_url(project["project_id"])
         project["owner"] = lab_owner(project["project_id"]) or "Unassigned"
         project["shared_with"] = shared_users(project["project_id"])
         project["can_share"] = can_manage_lab_sharing(request, project["project_id"])
         project["lab_group"] = "user" if has_admin_scope(request) and project["owner"] not in {current_user(request), "Unassigned"} else "mine"
-    return templates.TemplateResponse(request, "dashboard.html", {
+    return {
         "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "available_templates": available_templates, "pending_templates": pending_templates, "user": current_user(request),
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
@@ -1575,9 +1643,12 @@ async def dashboard(request: Request):
         "my_lab_count": sum(1 for project in projects if project["lab_group"] == "mine"),
         "user_lab_count": sum(1 for project in projects if project["lab_group"] == "user"),
         "retained_backups": retained_backups_for(None if has_admin_scope(request) else current_user(request)),
-        "gns3_url": GNS3_URL, "audit": recent_audit(username=current_user(request), include_all=has_admin_scope(request)),
+        "gns3_url": GNS3_URL, "has_admin_scope": has_admin_scope(request),
         "import_job_id": request.query_params.get("import_job", ""),
-    })
+        "running_lab_count": sum(1 for project in projects if project["is_running"]),
+        "running_node_count": sum(project["node_running"] for project in projects),
+        "unassigned_lab_count": sum(1 for project in projects if project["owner"] == "Unassigned"),
+    }
 
 
 @app.get("/admin/system-status")
@@ -1635,32 +1706,46 @@ async def create_project(request: Request, name: str = Form(...)):
     return RedirectResponse(f"/projects/{project['project_id']}", status_code=303)
 
 
+def redirect_back(return_to: str, project_id: str, query: str = "") -> RedirectResponse:
+    """Redirect to the lab page a form came from, or to the labs list.
+
+    Only this lab's own page is accepted, so the field cannot be used as an
+    open redirect.
+    """
+    path, _, fragment = (return_to or "").partition("#")
+    target = path if path == f"/projects/{project_id}" else "/"
+    url = target + (f"?{query}" if query else "")
+    if target != "/" and fragment.isalpha():
+        url += f"#{fragment}"
+    return RedirectResponse(url, status_code=303)
+
+
 @app.post("/projects/{project_id}/start")
-async def start_lab(request: Request, project_id: str):
+async def start_lab(request: Request, project_id: str, return_to: str = Form("")):
     user = current_user(request)
     require_project_access(request, project_id)
     if backup_is_active(project_id):
-        return RedirectResponse("/?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+starting+nodes", status_code=303)
+        return redirect_back(return_to, project_id, "error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+starting+nodes")
     try:
         started, ignored = await set_lab_node_power(project_id, "start")
     except HTTPException as exc:
-        return RedirectResponse(f"/?error={quote_plus(str(exc.detail))}", status_code=303)
+        return redirect_back(return_to, project_id, f"error={quote_plus(str(exc.detail))}")
     audit(audit_actor(request), "start_lab", project_id, {"nodes_started": started, "non_stoppable_nodes": ignored})
-    return RedirectResponse(f"/?message={quote_plus(f'Start requested for {started} lab node(s).')}", status_code=303)
+    return redirect_back(return_to, project_id, f"message={quote_plus(f'Start requested for {started} lab node(s).')}")
 
 
 @app.post("/projects/{project_id}/stop")
-async def stop_lab(request: Request, project_id: str):
+async def stop_lab(request: Request, project_id: str, return_to: str = Form("")):
     user = current_user(request)
     require_project_access(request, project_id)
     if backup_is_active(project_id):
-        return RedirectResponse("/?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+stopping+nodes", status_code=303)
+        return redirect_back(return_to, project_id, "error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+stopping+nodes")
     try:
         stopped, ignored = await set_lab_node_power(project_id, "stop")
     except HTTPException as exc:
-        return RedirectResponse(f"/?error={quote_plus(str(exc.detail))}", status_code=303)
+        return redirect_back(return_to, project_id, f"error={quote_plus(str(exc.detail))}")
     audit(audit_actor(request), "stop_lab", project_id, {"nodes_stopped": stopped, "non_stoppable_nodes": ignored})
-    return RedirectResponse(f"/?message={quote_plus(f'Stop requested for {stopped} lab node(s).')}", status_code=303)
+    return redirect_back(return_to, project_id, f"message={quote_plus(f'Stop requested for {stopped} lab node(s).')}")
 
 
 @app.get("/projects/{project_id}", response_class=HTMLResponse)
@@ -1670,10 +1755,15 @@ async def project_page(request: Request, project_id: str):
     try:
         require_project_access(request, project_id)
         project = await gns3("GET", f"/v2/projects/{project_id}")
-        snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
+        snapshots, nodes = await asyncio.gather(
+            gns3("GET", f"/v2/projects/{project_id}/snapshots"),
+            gns3("GET", f"/v2/projects/{project_id}/nodes"),
+        )
     except HTTPException as exc:
         return error_page(request, exc)
     snapshots, snapshot_total_bytes, storage_scanned = snapshot_storage(project, snapshots)
+    nodes = sorted(nodes or [], key=lambda node: str(node.get("name", "")).lower())
+    node_running = sum(1 for node in nodes if not is_non_stoppable_node(node) and node.get("status") != "stopped")
     snapshots.sort(key=lambda item: str(item.get("completed_at") or item.get("created_at") or ""))
     requested_job_id = request.query_params.get("backup_job", "")
     backup_job_id = requested_job_id if requested_job_id in app.state.backup_jobs else ""
@@ -1682,6 +1772,8 @@ async def project_page(request: Request, project_id: str):
                               if job.get("project_id") == project_id and job.get("status") in ACTIVE_BACKUP_STATES), "")
     return templates.TemplateResponse(request, "project.html", {
         "project": project, "snapshots": snapshots, "snapshot_total_bytes": snapshot_total_bytes,
+        "nodes": nodes, "node_running": node_running, "node_total": sum(1 for node in nodes if not is_non_stoppable_node(node)),
+        "access_lab_url": gns3_webui_project_url(project_id), "active_nav": "labs", "lab_shared_with": shared_users(project_id), "has_admin_scope": has_admin_scope(request),
         "storage_scanned": storage_scanned, "user": current_user(request), "gns3_url": GNS3_URL,
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
         "can_share": can_manage_lab_sharing(request, project_id), "lab_owner": lab_owner(project_id), "portal_users": [account for account in list_users() if account.get("enabled")],
@@ -1930,22 +2022,22 @@ async def dashboard_import_job_status(request: Request, job_id: str):
 
 
 @app.post("/projects/{project_id}/rename")
-async def rename_project(request: Request, project_id: str, name: str = Form(...)):
+async def rename_project(request: Request, project_id: str, name: str = Form(...), return_to: str = Form("")):
     user = current_user(request)
     require_project_access(request, project_id)
     new_name = name.strip()
     if not new_name or len(new_name) > 80:
-        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
+        return redirect_back(return_to, project_id, "error=Use+a+lab+name+between+1+and+80+characters")
     try:
         project = await gns3("GET", f"/v2/projects/{project_id}")
         old_name = str(project.get("name", ""))
         if new_name == old_name:
-            return RedirectResponse("/", status_code=303)
+            return redirect_back(return_to, project_id)
         await gns3("PUT", f"/v2/projects/{project_id}", json={"name": new_name})
     except HTTPException as exc:
-        return RedirectResponse(f"/?error={quote_plus(str(exc.detail))}", status_code=303)
+        return redirect_back(return_to, project_id, f"error={quote_plus(str(exc.detail))}")
     audit(audit_actor(request), "rename_lab", project_id, {"old_name": old_name, "new_name": new_name})
-    return RedirectResponse("/?message=Lab+renamed", status_code=303)
+    return redirect_back(return_to, project_id, "message=Lab+renamed")
 
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/restore")

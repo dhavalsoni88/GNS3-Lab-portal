@@ -1,8 +1,71 @@
 {% extends "base.html" %}
-{% block title %}User administration · My Lab{% endblock %}
+{% block title %}Users · GNS3 Lab Portal{% endblock %}
 {% block content %}
-<a class="back" href="/">← Lab list</a>
-<section class="card create"><h2>Create user</h2><form method="post" action="/admin/users"><input name="username" maxlength="80" placeholder="Username" required><input name="password" type="password" minlength="12" placeholder="Temporary password (12+ characters)" required><select name="role"><option value="user">User</option><option value="admin">Admin</option></select><button>Create user</button></form></section>
-{% if request.query_params.get('error') %}<p class="error">{{ request.query_params.get('error').replace('+',' ') }}</p>{% endif %}{% if request.query_params.get('message') %}<p class="notice">{{ request.query_params.get('message').replace('+',' ') }}</p>{% endif %}
-<section><h2>Users</h2><div class="card"><table><thead><tr><th>Username</th><th>Role</th><th>Enabled</th><th>Retained backups</th><th>Password / update</th></tr></thead><tbody>{% for account in users %}<tr><td><div class="user-name-actions"><span>{{ account.username }}</span>{% if account.username != signed_in_user %}<form method="post" action="/admin/impersonate/{{ account.username }}"><button class="secondary">View as user</button></form>{% else %}<span class="muted">Current admin</span>{% endif %}</div><form id="update-user-{{ loop.index }}" method="post" action="/admin/users/{{ account.username }}/update"></form></td><td><select form="update-user-{{ loop.index }}" name="role"><option value="user" {% if account.role == 'user' %}selected{% endif %}>User</option><option value="admin" {% if account.role == 'admin' %}selected{% endif %}>Admin</option></select></td><td><label class="inline-check"><input form="update-user-{{ loop.index }}" type="checkbox" name="enabled" value="1" {% if account.enabled %}checked{% endif %}> Enabled</label></td><td><label class="quota-input">Max copies<input form="update-user-{{ loop.index }}" name="retained_backup_limit" type="number" min="0" max="100" value="{{ account.retained_backup_limit or 2 }}"></label></td><td><div class="password-update"><input form="update-user-{{ loop.index }}" name="password" type="password" minlength="12" placeholder="New password (optional)"><button form="update-user-{{ loop.index }}" class="secondary">Save</button></div></td></tr>{% endfor %}</tbody></table></div></section>
+<div class="page-head">
+  <div>
+    <h1>Users</h1>
+    <p class="subtitle">Portal accounts, their roles and their retained-backup allowance.</p>
+  </div>
+  <div class="actions">
+    <details class="menu">
+      <summary class="button primary big">+ Local user</summary>
+      <div class="menu-panel wide">
+        <form class="form-stack" method="post" action="/admin/users">
+          <label>Username<input name="username" maxlength="80" autocomplete="off" required></label>
+          <label>Temporary password<input name="password" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters" required></label>
+          <label>Role<select name="role"><option value="user">User</option><option value="admin">Administrator</option></select></label>
+          <button class="primary">Create user</button>
+        </form>
+      </div>
+    </details>
+  </div>
+</div>
+
+<div class="toolbar">
+  <label class="search"><span class="visually-hidden">Search users</span>
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
+    <input type="search" data-user-search placeholder="Search by username, name or email">
+  </label>
+  <span class="muted">{{ users | length }} account{{ '' if users | length == 1 else 's' }}</span>
+</div>
+
+<div class="table-card">
+  <table class="data responsive">
+    <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Retained backups</th><th scope="col">Created</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>{% for account in users %}{% set full_name = ((account.first_name or '') ~ ' ' ~ (account.last_name or '')) | trim %}
+      <tr data-user-row data-search="{{ (account.username ~ ' ' ~ full_name ~ ' ' ~ (account.email or '')) | lower }}">
+        <td class="primary-cell"><div class="cell-title">{{ full_name or account.username }}</div><div class="cell-meta">{{ account.username }}{% if account.email %} · {{ account.email }}{% endif %}</div></td>
+        <td data-label="Role">{% if account.role == 'admin' %}Administrator{% else %}User{% endif %}</td>
+        <td data-label="Status">{% if account.enabled %}<span class="pill ok">Enabled</span>{% else %}<span class="pill off">Disabled</span>{% endif %}</td>
+        <td data-label="Retained backups">Up to {{ account.retained_backup_limit if account.retained_backup_limit is not none else 2 }}</td>
+        <td data-label="Created"><time class="local-time" datetime="{{ account.created_at }}">—</time></td>
+        <td class="actions"><div class="row-actions">
+          <details class="menu">
+            <summary class="button">Edit</summary>
+            <div class="menu-panel wide">
+              <form class="form-stack" method="post" action="/admin/users/{{ account.username }}/update">
+                <label>Role<select name="role"><option value="user" {% if account.role == 'user' %}selected{% endif %}>User</option><option value="admin" {% if account.role == 'admin' %}selected{% endif %}>Administrator</option></select></label>
+                <label class="inline-check"><input type="checkbox" name="enabled" value="1" {% if account.enabled %}checked{% endif %} {% if account.username == signed_in_user %}disabled{% endif %}> Account enabled</label>
+                {% if account.username == signed_in_user %}<input type="hidden" name="enabled" value="1"><p class="muted" style="margin:0">You cannot disable your own account.</p>{% endif %}
+                <label>Retained backups allowed<input name="retained_backup_limit" type="number" min="0" max="100" value="{{ account.retained_backup_limit if account.retained_backup_limit is not none else 2 }}"></label>
+                <details>
+                  <summary class="link" style="cursor:pointer">Reset password…</summary>
+                  <label style="margin-top:8px">New temporary password<input name="password" type="password" minlength="12" autocomplete="new-password" placeholder="Leave blank to keep the current one"></label>
+                </details>
+                <button class="primary">Save changes</button>
+              </form>
+            </div>
+          </details>
+          {% if account.username != signed_in_user and account.enabled %}
+          <form method="post" action="/admin/impersonate/{{ account.username }}"><button title="See the portal exactly as this user does">View as user</button></form>
+          {% endif %}
+        </div></td>
+      </tr>{% endfor %}
+      <tr data-no-match hidden><td class="empty" colspan="6">No users match that search.</td></tr>
+    </tbody>
+  </table>
+</div>
 {% endblock %}
+{% block scripts %}<script>
+(()=>{const input=document.querySelector('[data-user-search]'),rows=[...document.querySelectorAll('[data-user-row]')],none=document.querySelector('[data-no-match]');input?.addEventListener('input',()=>{const text=input.value.trim().toLowerCase();let shown=0;rows.forEach(row=>{row.hidden=!!text&&!row.dataset.search.includes(text);if(!row.hidden)shown++});none.hidden=shown>0})})();
+</script>{% endblock %}

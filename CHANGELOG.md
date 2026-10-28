@@ -18,6 +18,16 @@ source release.
   retained backups and templates.
 - Hash passwords with Argon2id and upgrade v8.x scrypt hashes at sign-in.
 - Add automated tests for both database backends.
+- Replace the portal layout with the "console" design: a sidebar
+  (Labs, New lab, Templates, Activity/Audit log, Server status, Users), a
+  labs list with status, node counts, last backup, filters and search, and
+  a tabbed lab page (Overview with nodes, Backups, Sharing, Settings).
+- Move lab creation to its own page, templates and the approval queue to
+  Templates, the audit trail to its own page (with source IP and result),
+  and the server monitor to Server status.
+- Make every table usable on phones (rows become cards); add dark mode.
+- Return to the lab page after starting, stopping, sharing or renaming it.
+- Show backup dates when GNS3 reports them as Unix timestamps.
 
 ## v8.6.1 — Monitoring compute discovery fix
 
