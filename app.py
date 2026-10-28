@@ -1601,13 +1601,18 @@ async def administrator_system_status(request: Request):
     memory_used = numeric_value(compute, "memory_usage", "memory_used", "memory_used_bytes")
     if memory_total and memory_used is not None and memory_used <= 100 and memory_total > 1024:
         memory_used = memory_total * memory_used / 100
+    # GNS3 v2 computes report memory only as memory_usage_percent, without totals.
+    memory_percent = numeric_value(compute, "memory_usage_percent", "memory_percent")
+    if memory_percent is None and memory_total and memory_used is not None:
+        memory_percent = memory_used / memory_total * 100
     now = perf_counter(); current = disk_io_counters(PORTAL_MONITOR_DISKS); previous = app.state.monitor_disk_samples
     disks: dict[str, dict[str, float | int | None]] = {}
     for device, values in current.items():
         old = previous.get(device); elapsed = max(0.001, now - float(old.get("sampled_at", now))) if old else 0.0
         disks[device] = {**values, "read_bytes_per_second": max(0.0, (values["read_bytes"] - int(old["read_bytes"])) / elapsed) if old else None, "write_bytes_per_second": max(0.0, (values["write_bytes"] - int(old["write_bytes"])) / elapsed) if old else None}
     app.state.monitor_disk_samples = {device: {**values, "sampled_at": now} for device, values in current.items()}
-    return {"available": cpu_percent is not None or memory_total is not None, "cpu_percent": cpu_percent, "memory_total_bytes": int(memory_total) if memory_total is not None else None, "memory_used_bytes": int(memory_used) if memory_used is not None else None, "disks": disks, "message": "" if (cpu_percent is not None or memory_total is not None) else "This GNS3 server did not provide CPU or memory status."}
+    available = cpu_percent is not None or memory_percent is not None
+    return {"available": available, "cpu_percent": cpu_percent, "memory_percent": memory_percent, "memory_total_bytes": int(memory_total) if memory_total is not None else None, "memory_used_bytes": int(memory_used) if memory_used is not None else None, "disks": disks, "message": "" if available else "This GNS3 server did not provide CPU or memory status."}
 
 
 @app.post("/projects")

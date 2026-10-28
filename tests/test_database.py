@@ -155,7 +155,7 @@ def test_dashboard_and_lab_sharing_with_stub_gns3(client):
         if request.url.path == "/v2/computes":
             return httpx.Response(200, json=[{"compute_id": "local", "cpu_usage_percent": 12.5}])
         if request.url.path.startswith("/v2/"):
-            return httpx.Response(200, json={"compute_id": "local", "cpu_usage_percent": 12.5})
+            return httpx.Response(200, json={"compute_id": "local", "cpu_usage_percent": 12.5, "memory_usage_percent": 68.2})
         return httpx.Response(404, json={})
 
     original = portal.app.state.gns3_client
@@ -169,7 +169,8 @@ def test_dashboard_and_lab_sharing_with_stub_gns3(client):
         assert portal.shared_users("project-1") == ["Alice"]
         page = client.get("/")
         assert page.status_code == 200 and "Lab One" in page.text
-        assert client.get("/admin/system-status").json()["cpu_percent"] == 12.5
+        system_status = client.get("/admin/system-status").json()
+        assert system_status["cpu_percent"] == 12.5 and system_status["memory_percent"] == 68.2
         assert client.get("/admin/users").status_code == 200
         client.post("/logout")
     finally:
