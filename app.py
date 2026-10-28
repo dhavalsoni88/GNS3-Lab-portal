@@ -32,7 +32,7 @@ import portal_auth as auth
 import portal_db as db
 
 BASE_DIR = Path(__file__).resolve().parent
-GNS3_URL = os.getenv("GNS3_URL", "http://192.168.10.10:3080").rstrip("/")
+GNS3_URL = os.getenv("GNS3_URL", "http://127.0.0.1:3080").rstrip("/")
 # Public address where users load the GNS3 WebUI. Keep this separate from the
 # API address: the portal may use 127.0.0.1 while users reach a reverse proxy.
 GNS3_WEBUI_URL = os.getenv("GNS3_WEBUI_URL", GNS3_URL).rstrip("/")
@@ -47,6 +47,8 @@ SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
 # Public https:// address users and identity providers use to reach the portal.
 # Required for SAML: it forms the SP entity ID and the assertion consumer URL.
 PORTAL_PUBLIC_URL = os.getenv("PORTAL_PUBLIC_URL", "").strip().rstrip("/")
+# Send the session cookie only over HTTPS. Enable once the portal is behind TLS.
+PORTAL_COOKIE_SECURE = os.getenv("PORTAL_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
 AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_IDLE_SECONDS = max(60, int(os.getenv("PORTAL_SESSION_IDLE_SECONDS", "1800")))
 SESSION_MAX_SECONDS = max(SESSION_IDLE_SECONDS, int(os.getenv("PORTAL_SESSION_MAX_SECONDS", "28800")))
@@ -502,7 +504,7 @@ app = FastAPI(title="GNS3 Lab Portal", lifespan=lifespan)
 # The browser cookie contains only an opaque session token. Setting max_age to
 # None makes it a browser-session cookie; server-side expiry/revocation remains
 # the authoritative security control.
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False, same_site="lax", max_age=None)
+app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=PORTAL_COOKIE_SECURE, same_site="lax", max_age=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 

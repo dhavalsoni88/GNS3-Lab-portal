@@ -1,0 +1,14 @@
+[project]
+name = "gns3-lab-portal"
+version = "9.0.0.dev0"
+description = "Self-hosted web portal for creating, running, backing up and sharing GNS3 labs"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+  "ignore::DeprecationWarning:ldap3.*",
+  "ignore::DeprecationWarning:onelogin.*",
+  "ignore::DeprecationWarning:starlette.testclient",
+]

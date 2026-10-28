@@ -1,0 +1,2 @@
+# Test and development tools; the portal itself needs only requirements.txt.
+pytest==9.2.0
