@@ -27,6 +27,7 @@ os.environ.update({
     "RETAINED_BACKUP_DIR": str(TMP / "retained"),
     "LAB_TEMPLATE_DIR": str(TMP / "templates"),
     "PORTAL_LOG_DIR": str(TMP / "logs"),
+    "PORTAL_PUBLIC_URL": "https://portal.test.example",
 })
 if os.getenv("PORTAL_TEST_MARIADB"):
     os.environ.update({"PORTAL_DB_BACKEND": "mariadb", "PORTAL_DB_NAME": "gns3_portal_test", "PORTAL_DB_AUTO_MIGRATE": "true"})

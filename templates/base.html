@@ -11,7 +11,6 @@
 {% block login %}{% endblock %}
 {% else %}
 {% set active = active_nav | default('') %}
-{% set admin_view = has_admin_scope if has_admin_scope is defined else (is_admin and not impersonating) %}
 <div class="app">
   <aside class="sidebar">
     <div class="sidebar-top">
@@ -25,11 +24,11 @@
           <div class="nav-group">
             <div class="nav-group-title">Workspace</div>
             <a class="nav-link" href="/" {% if active == 'labs' %}aria-current="page"{% endif %}>Labs</a>
-            <a class="nav-link" href="/labs/new" {% if active == 'new_lab' %}aria-current="page"{% endif %}>New lab</a>
+            {% if can(request, 'labs.create') %}<a class="nav-link" href="/labs/new" {% if active == 'new_lab' %}aria-current="page"{% endif %}>New lab</a>{% endif %}
             {% if auth_enabled %}<a class="nav-link" href="/templates" {% if active == 'templates' %}aria-current="page"{% endif %}>Templates</a>
-            <a class="nav-link" href="/activity" {% if active == 'activity' %}aria-current="page"{% endif %}>{% if admin_view %}Audit log{% else %}My activity{% endif %}</a>{% endif %}
+            <a class="nav-link" href="/activity" {% if active == 'activity' %}aria-current="page"{% endif %}>{% if admin_can(request, 'audit.all') %}Audit log{% else %}My activity{% endif %}</a>{% endif %}
           </div>
-          {% if admin_view %}
+          {% if admin_can(request, 'servers.view') %}
           <div class="nav-group">
             <div class="nav-group-title">Infrastructure</div>
             <a class="nav-link" href="/admin/status" {% if active == 'status' %}aria-current="page"{% endif %}>Server status</a>
@@ -39,6 +38,8 @@
           <div class="nav-group">
             <div class="nav-group-title">Administration</div>
             <a class="nav-link" href="/admin/users" {% if active == 'users' %}aria-current="page"{% endif %}>Users</a>
+            <a class="nav-link" href="/admin/roles" {% if active == 'roles' %}aria-current="page"{% endif %}>Roles &amp; groups</a>
+            <a class="nav-link" href="/admin/identity" {% if active == 'identity' %}aria-current="page"{% endif %}>Identity providers</a>
           </div>
           {% endif %}
         </nav>
@@ -48,10 +49,10 @@
   <div class="main">
     <header class="topbar">
       <div class="spacer"></div>
-      {% if active != 'new_lab' %}<a class="button primary" href="/labs/new">+ New lab</a>{% endif %}
+      {% if active != 'new_lab' and can(request, 'labs.create') %}<a class="button primary" href="/labs/new">+ New lab</a>{% endif %}
       {% if auth_enabled and user %}{% set account_name = signed_in_user or user %}
       <details class="menu account-menu">
-        <summary aria-label="Account menu"><span class="account-avatar" aria-hidden="true">{% if account_name | account_has_avatar %}<img src="/profile/avatar" alt="">{% else %}<svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>{% endif %}</span><span>{{ account_name | account_display_name }}</span>{% if is_admin %}<span class="role-label">· Administrator</span>{% endif %}</summary>
+        <summary aria-label="Account menu"><span class="account-avatar" aria-hidden="true">{% if account_name | account_has_avatar %}<img src="/profile/avatar" alt="">{% else %}<svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="8" r="4"></circle><path d="M4.5 21c.8-4 3.3-6 7.5-6s6.7 2 7.5 6"></path></svg>{% endif %}</span><span>{{ account_name | account_display_name }}</span>{% if is_admin %}<span class="role-label">· Platform Admin</span>{% endif %}</summary>
         <div class="menu-panel">
           <a href="/profile">My profile</a>
           <form action="/logout" method="post"><button class="menu-item">Sign out</button></form>

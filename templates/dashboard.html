@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Labs · GNS3 Lab Portal{% endblock %}
 {% block content %}
-{% set admin_view = is_admin and not impersonating %}
+{% set admin_view = has_admin_scope %}{% set can_operate = can(request, "labs.operate") %}{% set can_edit = can(request, "labs.edit") %}
 <div class="page-head">
   <div>
     <h1>Labs</h1>
@@ -26,7 +26,7 @@
 </section>
 {% endif %}
 
-{% if pending_templates and admin_view %}
+{% if pending_templates and admin_can(request, "templates.approve") %}
 <p class="notice">{{ pending_templates | length }} template{{ '' if pending_templates | length == 1 else 's' }} waiting for your approval. <a href="/templates">Review templates</a></p>
 {% endif %}
 
@@ -68,7 +68,8 @@
         <td data-label="Last backup">{% if project.last_backup_at %}<time class="local-time" datetime="{{ project.last_backup_at }}">—</time>{% else %}<span class="muted">None</span>{% endif %}</td>
         <td class="actions">
           <div class="row-actions">
-            {% if project.is_running %}
+            {% if not can_operate %}
+            {% elif project.is_running %}
             <form method="post" action="/projects/{{ project.project_id }}/stop" onsubmit="return confirm('Stop all running nodes in this lab?')"><button type="submit">Stop</button></form>
             {% else %}
             <form method="post" action="/projects/{{ project.project_id }}/start" onsubmit="return confirm('Start all stopped nodes in this lab?')"><button type="submit">Start</button></form>
@@ -78,11 +79,13 @@
               <summary class="button icon-button" aria-label="More actions for {{ lab_name }}">⋯</summary>
               <div class="menu-panel wide">
                 <div class="menu-section"><a class="menu-item" href="/projects/{{ project.project_id }}">Manage lab, backups and nodes</a></div>
+                {% if can_edit %}
                 <div class="menu-section">
                   <h3>Rename</h3>
                   <form method="post" action="/projects/{{ project.project_id }}/rename"><label class="visually-hidden" for="rename-{{ loop.index }}">New name</label><input id="rename-{{ loop.index }}" name="name" maxlength="80" value="{{ project.name }}" required><button type="submit">Save</button></form>
                 </div>
-                {% if project.can_share %}
+                {% endif %}
+                {% if project.can_share and can_edit %}
                 <div class="menu-section">
                   <h3>Share</h3>
                   <form method="post" action="/projects/{{ project.project_id }}/shares"><label class="visually-hidden" for="share-{{ loop.index }}">Share with username</label><input id="share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Username" required><button type="submit">Share</button></form>

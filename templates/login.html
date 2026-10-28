@@ -14,7 +14,11 @@
     <form class="login-form" method="post" action="/login">
       <h2 style="font-size:22px;margin:0">Sign in</h2>
       {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-      <label>Username<input name="username" autocomplete="username" required autofocus></label>
+      {% for provider in saml_providers %}
+      <a class="button big" href="/auth/saml/{{ provider.provider_id }}/login">Continue with {{ provider.name }}</a>
+      {% endfor %}
+      {% if saml_providers %}<div class="divider">or use {% if ldap_enabled %}your directory or portal account{% else %}a portal account{% endif %}</div>{% endif %}
+      <label>Username{% if ldap_enabled %} <span class="small">(DOMAIN\name, name@domain or portal username)</span>{% endif %}<input name="username" autocomplete="username" required autofocus></label>
       <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
       <button class="primary">Sign in</button>
     </form>

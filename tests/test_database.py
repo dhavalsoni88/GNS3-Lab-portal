@@ -105,12 +105,12 @@ def test_audit_tables_are_append_only():
 @pytest.mark.skipif(not MARIADB, reason="MariaDB change-log triggers")
 def test_change_log_records_actor_and_never_password_hash(client):
     login(client, "portaladmin", "initial-admin-password")
-    client.post("/admin/users/Alice/update", data={"role": "user", "enabled": "1", "password": "alice-new-password", "retained_backup_limit": "3"})
+    client.post("/admin/users/Alice/update", data={"roles": ["lab_editor"], "enabled": "1", "password": "alice-new-password", "retained_backup_limit": "3"})
     client.post("/logout")
     with db.connect() as connection:
         rows = connection.execute("SELECT * FROM db_change_log WHERE table_name='portal_users' AND row_key='Alice' ORDER BY id").fetchall()
-    assert [row["operation"] for row in rows] == ["INSERT", "UPDATE"]
-    update = rows[-1]
+    assert rows[0]["operation"] == "INSERT"
+    update = next(row for row in rows if row["operation"] == "UPDATE" and json.loads(row["new_values"]).get("password_changed"))
     assert update["portal_actor"] == "portaladmin"
     assert update["source_ip"] == "testclient"
     new_values = json.loads(update["new_values"])

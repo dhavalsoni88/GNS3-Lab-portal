@@ -1,10 +1,15 @@
 {% extends "base.html" %}
 {% block title %}Users · GNS3 Lab Portal{% endblock %}
+{% macro role_checkboxes(selected, prefix) %}
+<fieldset><legend>Roles assigned directly</legend>
+{% for key, role in ROLES.items() %}<label class="inline-check"><input type="checkbox" name="roles" value="{{ key }}" {% if key in selected %}checked{% endif %}> {{ role[0] }}</label>{% endfor %}
+</fieldset>
+{% endmacro %}
 {% block content %}
 <div class="page-head">
   <div>
     <h1>Users</h1>
-    <p class="subtitle">Portal accounts, their roles and their retained-backup allowance.</p>
+    <p class="subtitle">Local accounts plus everyone who has signed in through Active Directory or single sign-on. <a href="/admin/roles">What each role can do</a></p>
   </div>
   <div class="actions">
     <details class="menu">
@@ -13,7 +18,7 @@
         <form class="form-stack" method="post" action="/admin/users">
           <label>Username<input name="username" maxlength="80" autocomplete="off" required></label>
           <label>Temporary password<input name="password" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters" required></label>
-          <label>Role<select name="role"><option value="user">User</option><option value="admin">Administrator</option></select></label>
+          {{ role_checkboxes(['lab_editor'], 'new') }}
           <button class="primary">Create user</button>
         </form>
       </div>
@@ -24,34 +29,37 @@
 <div class="toolbar">
   <label class="search"><span class="visually-hidden">Search users</span>
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
-    <input type="search" data-user-search placeholder="Search by username, name or email">
+    <input type="search" data-user-search placeholder="Search by username, name, email or role">
   </label>
   <span class="muted">{{ users | length }} account{{ '' if users | length == 1 else 's' }}</span>
 </div>
 
 <div class="table-card">
   <table class="data responsive">
-    <thead><tr><th scope="col">User</th><th scope="col">Role</th><th scope="col">Status</th><th scope="col">Retained backups</th><th scope="col">Created</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
-    <tbody>{% for account in users %}{% set full_name = ((account.first_name or '') ~ ' ' ~ (account.last_name or '')) | trim %}
-      <tr data-user-row data-search="{{ (account.username ~ ' ' ~ full_name ~ ' ' ~ (account.email or '')) | lower }}">
+    <thead><tr><th scope="col">User</th><th scope="col">Signs in with</th><th scope="col">Roles</th><th scope="col">Status</th><th scope="col">Last sign-in</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>{% for account in users %}{% set full_name = ((account.first_name or '') ~ ' ' ~ (account.last_name or '')) | trim %}{% set source = account.auth_source or 'local' %}{% set provider = providers.get(account.auth_provider) %}
+      <tr data-user-row data-search="{{ (account.username ~ ' ' ~ full_name ~ ' ' ~ (account.email or '') ~ ' ' ~ (account.direct_roles + account.group_roles) | map('role_name') | join(' ')) | lower }}">
         <td class="primary-cell"><div class="cell-title">{{ full_name or account.username }}</div><div class="cell-meta">{{ account.username }}{% if account.email %} · {{ account.email }}{% endif %}</div></td>
-        <td data-label="Role">{% if account.role == 'admin' %}Administrator{% else %}User{% endif %}</td>
+        <td data-label="Signs in with">{% if source == 'local' %}Local account{% else %}{{ provider.name if provider else account.auth_provider }}<div class="cell-meta">{{ 'Active Directory' if source == 'ldap' else 'Single sign-on' }}</div>{% endif %}</td>
+        <td data-label="Roles">{% for key in account.direct_roles %}{{ key | role_name }}{% if not loop.last %}, {% endif %}{% endfor %}{% if account.group_roles %}{% if account.direct_roles %}, {% endif %}{% for key in account.group_roles %}{{ key | role_name }}{% if not loop.last %}, {% endif %}{% endfor %}<div class="cell-meta">{{ account.group_roles | length }} from groups</div>{% elif not account.direct_roles %}<span class="pill warn">No role</span>{% endif %}</td>
         <td data-label="Status">{% if account.enabled %}<span class="pill ok">Enabled</span>{% else %}<span class="pill off">Disabled</span>{% endif %}</td>
-        <td data-label="Retained backups">Up to {{ account.retained_backup_limit if account.retained_backup_limit is not none else 2 }}</td>
-        <td data-label="Created"><time class="local-time" datetime="{{ account.created_at }}">—</time></td>
+        <td data-label="Last sign-in">{% if account.last_login_at %}<time class="local-time" datetime="{{ account.last_login_at }}">—</time>{% else %}<span class="muted">Never</span>{% endif %}</td>
         <td class="actions"><div class="row-actions">
           <details class="menu">
             <summary class="button">Edit</summary>
             <div class="menu-panel wide">
               <form class="form-stack" method="post" action="/admin/users/{{ account.username }}/update">
-                <label>Role<select name="role"><option value="user" {% if account.role == 'user' %}selected{% endif %}>User</option><option value="admin" {% if account.role == 'admin' %}selected{% endif %}>Administrator</option></select></label>
+                {{ role_checkboxes(account.direct_roles, loop.index) }}
+                {% if account.group_roles %}<p class="muted" style="margin:0">From groups at last sign-in: {{ account.group_roles | map('role_name') | join(', ') }}. Change these with group mappings.</p>{% endif %}
                 <label class="inline-check"><input type="checkbox" name="enabled" value="1" {% if account.enabled %}checked{% endif %} {% if account.username == signed_in_user %}disabled{% endif %}> Account enabled</label>
                 {% if account.username == signed_in_user %}<input type="hidden" name="enabled" value="1"><p class="muted" style="margin:0">You cannot disable your own account.</p>{% endif %}
                 <label>Retained backups allowed<input name="retained_backup_limit" type="number" min="0" max="100" value="{{ account.retained_backup_limit if account.retained_backup_limit is not none else 2 }}"></label>
+                {% if source == 'local' %}
                 <details>
                   <summary class="link" style="cursor:pointer">Reset password…</summary>
                   <label style="margin-top:8px">New temporary password<input name="password" type="password" minlength="12" autocomplete="new-password" placeholder="Leave blank to keep the current one"></label>
                 </details>
+                {% endif %}
                 <button class="primary">Save changes</button>
               </form>
             </div>

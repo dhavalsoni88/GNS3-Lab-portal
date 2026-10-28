@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}{{ project.name }} · GNS3 Lab Portal{% endblock %}
 {% block content %}
-{% set is_running = node_running > 0 %}
+{% set is_running = node_running > 0 %}{% set can_operate = can(request, "labs.operate") %}{% set can_edit = can(request, "labs.edit") %}{% set can_destroy = can_edit and (has_admin_scope or lab_owner == user) %}
 {% set return_to = '/projects/' ~ project.project_id %}
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/">Labs</a> / {{ project.name }}</nav>
 <div class="page-head">
@@ -13,12 +13,13 @@
     <p class="subtitle">Owner {{ lab_owner or 'not assigned' }} · <span class="mono" title="Lab ID">{{ project.project_id }}</span></p>
   </div>
   <div class="actions">
-    {% if is_running %}
+    {% if not can_operate %}
+    {% elif is_running %}
     <form method="post" action="/projects/{{ project.project_id }}/stop" onsubmit="return confirm('Stop all running nodes in this lab?')"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="big">Stop lab</button></form>
     {% else %}
     <form method="post" action="/projects/{{ project.project_id }}/start" onsubmit="return confirm('Start all stopped nodes in this lab?')"><input type="hidden" name="return_to" value="{{ return_to }}"><button class="big">Start lab</button></form>
     {% endif %}
-    <a class="button big" href="#backups" data-open-tab="backups">Back up</a>
+    {% if can_edit %}<a class="button big" href="#backups" data-open-tab="backups">Back up</a>{% endif %}
     <a class="button primary big" target="_blank" rel="noopener" href="{{ access_lab_url }}">Open in GNS3<span aria-hidden="true"> ↗</span><span class="visually-hidden"> (new tab)</span></a>
   </div>
 </div>
@@ -26,7 +27,7 @@
 <div class="tabs" role="tablist" aria-label="Lab sections">
   <button type="button" class="tab" role="tab" id="tab-overview" aria-controls="panel-overview" data-tab="overview">Overview</button>
   <button type="button" class="tab" role="tab" id="tab-backups" aria-controls="panel-backups" data-tab="backups">Backups ({{ snapshots | length }})</button>
-  {% if can_share %}<button type="button" class="tab" role="tab" id="tab-sharing" aria-controls="panel-sharing" data-tab="sharing">Sharing</button>{% endif %}
+  {% if can_share and can_edit %}<button type="button" class="tab" role="tab" id="tab-sharing" aria-controls="panel-sharing" data-tab="sharing">Sharing</button>{% endif %}
   <button type="button" class="tab" role="tab" id="tab-settings" aria-controls="panel-settings" data-tab="settings">Settings</button>
 </div>
 
@@ -70,19 +71,19 @@
 
 <section id="panel-backups" role="tabpanel" aria-labelledby="tab-backups" data-tab-panel="backups">
   <div style="display:flex;flex-direction:column;gap:16px">
-  <div class="card">
+  {% if can_edit %}<div class="card">
     <h2>Create a backup</h2>
     <form class="form-stack" style="max-width:none" method="post" action="/projects/{{ project.project_id }}/snapshots" onsubmit="return confirm('All lab nodes will be stopped and left off. Create this backup?')">
       <div class="form-row"><label>Backup name<input class="backup-name" name="name" maxlength="80" placeholder="e.g. Before firewall changes" required></label><button class="primary big">Stop nodes and back up</button></div>
       <label class="inline-check"><input type="checkbox" name="stop_confirmation" value="stop-and-backup" required><span>I understand every running node is stopped first and stays off afterwards.</span></label>
     </form>
-  </div>
+  </div>{% endif %}
 
   <div class="toolbar">
     <p class="muted" style="margin:0">{% if storage_scanned %}Backup storage used: {{ snapshot_total_bytes | storage_size }}.{% else %}Sizes appear when the portal can read the GNS3 projects folder.{% endif %}</p>
     <div class="row-actions">
       <a class="button" href="/projects/{{ project.project_id }}#backups">Refresh</a>
-      {% if snapshots and can_share %}
+      {% if snapshots and can_share and can_edit %}
       <details class="menu">
         <summary class="button">Make template</summary>
         <div class="menu-panel wide">
@@ -90,12 +91,12 @@
             <p class="muted" data-template-selection>Select one backup.</p>
             <label>Template name<input data-template-name name="name" maxlength="100" required disabled></label>
             <label>Description<input name="description" maxlength="500" placeholder="Optional" disabled></label>
-            <button class="primary" data-template-submit disabled>{% if has_admin_scope %}Publish template{% else %}Submit for approval{% endif %}</button>
+            <button class="primary" data-template-submit disabled>{% if admin_can(request, 'templates.approve') %}Publish template{% else %}Submit for approval{% endif %}</button>
           </form>
         </div>
       </details>
       {% endif %}
-      {% if snapshots %}<form id="bulk-backup-delete" method="post" action="/projects/{{ project.project_id }}/snapshots/delete" onsubmit="return confirm('Permanently delete every selected backup? This cannot be undone.')"><button class="danger" data-bulk-delete disabled>Delete selected</button></form>{% endif %}
+      {% if snapshots and can_destroy %}<form id="bulk-backup-delete" method="post" action="/projects/{{ project.project_id }}/snapshots/delete" onsubmit="return confirm('Permanently delete every selected backup? This cannot be undone.')"><button class="danger" data-bulk-delete disabled>Delete selected</button></form>{% endif %}
     </div>
   </div>
 
@@ -105,21 +106,21 @@
       <tbody>
       {% for snapshot in snapshots %}{% set size_bytes = snapshot.get('size_bytes') %}{% set template = snapshot_templates.get(snapshot.snapshot_id) %}
         <tr>
-          <td data-label="Select"><input type="checkbox" form="bulk-backup-delete" name="snapshot_ids" value="{{ snapshot.snapshot_id }}" data-backup-select data-backup-name="{{ snapshot.name | default('Unnamed backup') }}" {% if template %}data-has-template="true"{% endif %} aria-label="Select {{ snapshot.name | default('backup') }}"></td>
+          <td data-label="Select">{% if can_destroy %}<input type="checkbox" form="bulk-backup-delete" name="snapshot_ids" value="{{ snapshot.snapshot_id }}" data-backup-select data-backup-name="{{ snapshot.name | default('Unnamed backup') }}" {% if template %}data-has-template="true"{% endif %} aria-label="Select {{ snapshot.name | default('backup') }}">{% endif %}</td>
           <td class="primary-cell" title="ID: {{ snapshot.snapshot_id }}"><span class="cell-title">{{ snapshot.name | default('Unnamed backup') }}</span>{% if template %}<div class="cell-meta">Template: {{ template.name }}{% if template.approval_status == 'pending' %} (awaiting approval){% endif %}</div>{% endif %}</td>
           <td data-label="Created"><time class="local-time" datetime="{{ (snapshot.completed_at or snapshot.created_at) | backup_datetime }}">—</time></td>
           <td data-label="Size">{% if size_bytes is not none %}{{ size_bytes | storage_size }}{% else %}<span class="muted">Unknown</span>{% endif %}</td>
           <td data-label="Status"><span class="pill ok">Complete</span></td>
           <td class="actions"><div class="row-actions">
-            <form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/restore" onsubmit="return confirm('Restore this backup? The current lab state will be replaced.')"><button>Restore</button></form>
+            {% if can_destroy %}<form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/restore" onsubmit="return confirm('Restore this backup? The current lab state will be replaced.')"><button>Restore</button></form>{% endif %}
             <details class="menu">
               <summary class="button icon-button" aria-label="More actions for {{ snapshot.name | default('backup') }}">⋯</summary>
               <div class="menu-panel wide">
                 <div class="menu-section">
                   <a class="menu-item" href="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/download">Download backup file</a>
-                  <form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/clone"><label class="visually-hidden" for="clone-{{ loop.index }}">Name for the new lab</label><input id="clone-{{ loop.index }}" name="name" maxlength="80" placeholder="New lab from this backup" required><button>Create</button></form>
+                  {% if can(request, 'labs.create') %}<form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/clone"><label class="visually-hidden" for="clone-{{ loop.index }}">Name for the new lab</label><input id="clone-{{ loop.index }}" name="name" maxlength="80" placeholder="New lab from this backup" required><button>Create</button></form>{% endif %}
                 </div>
-                {% if can_share %}
+                {% if can_share and can_edit %}
                 <div class="menu-section">
                   <h3>Share this backup once</h3>
                   <form method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/shares"><label class="visually-hidden" for="backup-share-{{ loop.index }}">Username</label><input id="backup-share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Username" required><button>Share</button></form>
@@ -160,7 +161,7 @@
   </div>
 </section>
 
-{% if can_share %}
+{% if can_share and can_edit %}
 <section id="panel-sharing" role="tabpanel" aria-labelledby="tab-sharing" data-tab-panel="sharing">
   <div class="card form-stack">
     <h2>Share this lab</h2>
@@ -175,23 +176,23 @@
 
 <section id="panel-settings" role="tabpanel" aria-labelledby="tab-settings" data-tab-panel="settings">
   <div style="display:flex;flex-direction:column;gap:16px">
-  <div class="card form-stack">
+  {% if can_edit %}<div class="card form-stack">
     <h2>Rename</h2>
     <form class="form-row" method="post" action="/projects/{{ project.project_id }}/rename"><input type="hidden" name="return_to" value="{{ return_to }}#settings"><label>Lab name<input name="name" maxlength="80" value="{{ project.name }}" required></label><button class="big">Save name</button></form>
-  </div>
+  </div>{% endif %}
   <div class="card">
     <h2>Export</h2>
     <p class="muted">Download a portable GNS3 project archive. Importing it elsewhere needs the same appliance images on that GNS3 server.</p>
     <a class="button" href="/projects/{{ project.project_id }}/export">Download portable lab</a>
   </div>
-  <div class="card danger-zone">
+  {% if can_destroy %}<div class="card danger-zone">
     <h2>Delete this lab</h2>
     <form class="form-stack" method="post" action="/projects/{{ project.project_id }}/delete" onsubmit="return confirm('This permanently deletes the lab. Continue?')">
       {% if snapshots %}<fieldset><legend>Keep backups in your archive ({{ retained_remaining }} of {{ retained_limit }} slots free)</legend>{% for snapshot in snapshots %}<label class="inline-check"><input type="checkbox" name="retained_snapshot_ids" value="{{ snapshot.snapshot_id }}" {% if retained_remaining == 0 %}disabled{% endif %}> {{ snapshot.name | default('Unnamed backup') }}</label>{% endfor %}</fieldset>{% endif %}
-      <label>Type <strong style="color:var(--ink)">{{ project.name }}</strong> to confirm<input name="confirmation" autocomplete="off" required></label>
+      <label><span>Type <strong style="color:var(--ink)">{{ project.name }}</strong> to confirm</span><input name="confirmation" autocomplete="off" required></label>
       <div><button class="danger solid big">Delete lab</button></div>
     </form>
-  </div>
+  </div>{% endif %}
   </div>
 </section>
 <datalist id="shareable-users">{% for account in portal_users if account.username != lab_owner %}<option value="{{ account.username }}">{% endfor %}</datalist>

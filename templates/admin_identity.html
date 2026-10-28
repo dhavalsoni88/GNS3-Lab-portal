@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Identity providers · GNS3 Lab Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Identity providers</h1><p class="subtitle">Let people sign in with Active Directory or single sign-on. Local accounts always keep working, so an administrator can get in if a provider is down.</p></div>
+  <div class="actions">
+    <a class="button" href="/admin/identity/new/ldap">+ Active Directory (LDAPS)</a>
+    <details class="menu">
+      <summary class="button primary">+ Single sign-on (SAML)</summary>
+      <div class="menu-panel">{% for key, preset in presets.items() %}<a href="/admin/identity/new/saml?preset={{ key }}">{{ preset.label }}</a>{% endfor %}</div>
+    </details>
+  </div>
+</div>
+{% if weak_secret_key %}<p class="error">PORTAL_SECRET_KEY is missing, a placeholder or shorter than 32 characters. It encrypts directory passwords stored here: set a long random value in <code>.env</code> before adding a provider.</p>{% endif %}
+{% if not public_url %}<p class="notice">Single sign-on needs <code>PORTAL_PUBLIC_URL</code> in <code>.env</code>: the https:// address people use to reach the portal (for example <code>https://lab-portal.example.com</code>). SAML providers stay hidden on the sign-in page until it is set.</p>{% endif %}
+<div class="table-card">
+  <table class="data responsive">
+    <thead><tr><th scope="col">Provider</th><th scope="col">Type</th><th scope="col">Status</th><th scope="col">Users</th><th scope="col">Updated</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>{% for provider in providers %}
+      <tr>
+        <td class="primary-cell"><a class="cell-title" href="/admin/identity/{{ provider.provider_id }}">{{ provider.name }}</a><div class="cell-meta mono">{{ provider.provider_id }}</div></td>
+        <td data-label="Type">{% if provider.kind == 'ldap' %}Active Directory (LDAPS){% else %}SAML · {{ presets.get(provider.config.preset, presets.other).label }}{% endif %}</td>
+        <td data-label="Status">{% if provider.enabled %}<span class="pill ok">Enabled</span>{% else %}<span class="pill off">Disabled</span>{% endif %}</td>
+        <td data-label="Users">{{ user_counts.get(provider.provider_id, 0) }}</td>
+        <td data-label="Updated"><time class="local-time" datetime="{{ provider.updated_at }}">—</time></td>
+        <td class="actions"><a class="button" href="/admin/identity/{{ provider.provider_id }}">Configure</a></td>
+      </tr>{% else %}
+      <tr><td class="empty" colspan="6">No identity providers yet. Everyone signs in with a local portal account.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

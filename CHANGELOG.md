@@ -28,6 +28,18 @@ source release.
 - Make every table usable on phones (rows become cards); add dark mode.
 - Return to the lab page after starting, stopping, sharing or renaming it.
 - Show backup dates when GNS3 reports them as Unix timestamps.
+- Add seven roles (Platform Admin, Lab Manager, Template Approver, Lab
+  Editor, Lab Operator, Viewer, Auditor), enforced on every lab, backup,
+  template, user, audit and server-status action. v8.x admins become
+  Platform Admins and users become Lab Editors.
+- Add Active Directory sign-in over LDAPS only, with CA and hostname
+  verification, nested-group support, connection test and group search.
+- Add SAML 2.0 single sign-on for Microsoft Entra ID, Okta and ADFS, with
+  signed-assertion, request-ID and replay checks.
+- Map directory and SSO groups to roles; group roles refresh at each
+  sign-in. Keep a local Platform Admin as break-glass access.
+- Restrict restoring and deleting backups, and deleting labs, to the lab
+  owner or a Lab Manager.
 
 ## v8.6.1 — Monitoring compute discovery fix
 

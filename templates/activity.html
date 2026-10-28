@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}{% if has_admin_scope %}Audit log{% else %}My activity{% endif %} · GNS3 Lab Portal{% endblock %}
+{% block title %}{% if audit_all %}Audit log{% else %}My activity{% endif %} · GNS3 Lab Portal{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
-    <h1>{% if has_admin_scope %}Audit log{% else %}My activity{% endif %}</h1>
-    <p class="subtitle">{% if has_admin_scope %}Every recorded portal action, newest first (latest {{ audit | length }}).{% else %}Actions you have taken in the portal, newest first.{% endif %}</p>
+    <h1>{% if audit_all %}Audit log{% else %}My activity{% endif %}</h1>
+    <p class="subtitle">{% if audit_all %}Every recorded portal action, newest first (latest {{ audit | length }}).{% else %}Actions you have taken in the portal, newest first.{% endif %}</p>
   </div>
 </div>
 <div class="toolbar">
@@ -12,19 +12,19 @@
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
     <input type="search" data-audit-search placeholder="Filter by action, user, lab or IP address">
   </label>
-  {% if has_admin_scope %}<div class="chips" role="group" aria-label="Filter by outcome"><button type="button" class="chip" data-outcome="all" aria-pressed="true">All</button><button type="button" class="chip" data-outcome="failure" aria-pressed="false">Failures only</button></div>{% endif %}
+  {% if audit_all %}<div class="chips" role="group" aria-label="Filter by outcome"><button type="button" class="chip" data-outcome="all" aria-pressed="true">All</button><button type="button" class="chip" data-outcome="failure" aria-pressed="false">Failures only</button></div>{% endif %}
 </div>
 <div class="table-card">
   <table class="data responsive">
-    <thead><tr><th scope="col">When</th><th scope="col">Action</th>{% if has_admin_scope %}<th scope="col">User</th>{% endif %}<th scope="col">Target</th><th scope="col">Result</th>{% if has_admin_scope %}<th scope="col">Source IP</th>{% endif %}</tr></thead>
+    <thead><tr><th scope="col">When</th><th scope="col">Action</th>{% if audit_all %}<th scope="col">User</th>{% endif %}<th scope="col">Target</th><th scope="col">Result</th>{% if audit_all %}<th scope="col">Source IP</th>{% endif %}</tr></thead>
     <tbody>{% for item in audit %}{% set outcome = item.outcome or 'success' %}
       <tr data-audit-row data-outcome="{{ outcome }}" data-search="{{ (item.action ~ ' ' ~ item.actor ~ ' ' ~ item.target ~ ' ' ~ (item.source_ip or '')) | lower }}">
         <td class="primary-cell"><time class="local-time" datetime="{{ item.timestamp }}">—</time></td>
         <td data-label="Action">{{ item.action.replace('_', ' ') | capitalize }}</td>
-        {% if has_admin_scope %}<td data-label="User">{{ item.actor }}</td>{% endif %}
+        {% if audit_all %}<td data-label="User">{{ item.actor }}</td>{% endif %}
         <td data-label="Target" class="mono" style="word-break:break-all">{{ item.target }}</td>
         <td data-label="Result">{% if outcome == 'success' %}<span class="pill ok">Success</span>{% else %}<span class="pill bad">{{ outcome | capitalize }}</span>{% endif %}</td>
-        {% if has_admin_scope %}<td data-label="Source IP" class="mono">{{ item.source_ip or '—' }}</td>{% endif %}
+        {% if audit_all %}<td data-label="Source IP" class="mono">{{ item.source_ip or '—' }}</td>{% endif %}
       </tr>{% else %}
       <tr><td class="empty" colspan="6">No activity recorded yet.</td></tr>{% endfor %}
       <tr data-no-match hidden><td class="empty" colspan="6">Nothing matches that filter.</td></tr>

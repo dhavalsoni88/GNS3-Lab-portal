@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}{{ provider.name or 'New identity provider' }} · GNS3 Lab Portal{% endblock %}
+{% macro default_role_select(current) %}
+<label>Role for members of unmapped groups<select name="default_role"><option value="" {% if not current %}selected{% endif %}>None: refuse the sign-in</option>{% for key, role in ROLES.items() %}<option value="{{ key }}" {% if key == current %}selected{% endif %}>{{ role[0] }}</option>{% endfor %}</select></label>
+{% endmacro %}
+{% block content %}
+{% set pid = provider.provider_id %}
+{% set is_ldap = provider.kind == 'ldap' %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/admin/identity">Identity providers</a> / {{ provider.name or ('New Active Directory connection' if is_ldap else 'New single sign-on provider') }}</nav>
+<div class="page-head"><div><h1>{{ provider.name or ('Connect Active Directory' if is_ldap else 'Add ' ~ presets.get(config.preset, presets.other).label) }}</h1>
+<p class="subtitle">{% if is_ldap %}Users sign in with their directory username and password. The portal connects over LDAPS only and verifies the directory's certificate.{% else %}Users choose “Continue with {{ provider.name or presets.get(config.preset, presets.other).label }}” on the sign-in page. Assertions must be signed by the identity provider.{% endif %}</p></div></div>
+
+<div class="grid-2">
+<form class="card wide form-stack" style="max-width:none" method="post" action="/admin/identity/save">
+  <input type="hidden" name="kind" value="{{ provider.kind }}">
+  <div class="form-row">
+    <label>Display name<input name="name" maxlength="120" value="{{ provider.name or ('Corporate AD' if is_ldap else presets.get(config.preset, presets.other).label) }}" required></label>
+    <label>Provider ID<input name="provider_id" pattern="[a-z][a-z0-9-]{1,39}" value="{{ pid or ('corp-ad' if is_ldap else config.preset) }}" {% if pid %}readonly{% endif %} required><span class="small">Lowercase; appears in sign-in URLs and cannot change later.</span></label>
+  </div>
+  <label class="inline-check"><input type="checkbox" name="enabled" value="1" {% if provider.enabled %}checked{% endif %}> Enabled: users can sign in with this provider</label>
+  {% if is_ldap %}
+  <hr><h2>Connection</h2>
+  <div class="form-row"><label>Directory URL<input name="url" value="{{ config.url }}" placeholder="ldaps://dc01.corp.example.com:636" required><span class="small">ldaps:// only. Use the name on the domain controller's certificate.</span></label><label style="flex:0 1 160px">Timeout (seconds)<input name="timeout_seconds" type="number" min="2" max="60" value="{{ config.timeout_seconds }}"></label></div>
+  <label>CA certificate (PEM)<textarea name="ca_pem" rows="5" class="mono" placeholder="-----BEGIN CERTIFICATE-----&#10;…your enterprise root CA…&#10;-----END CERTIFICATE-----">{{ config.ca_pem }}</textarea><span class="small">The root (and any intermediate) CA that issued the domain controllers' certificates. Leave blank only if the operating system already trusts it.</span></label>
+  <hr><h2>Service account</h2>
+  <p class="muted" style="margin:0">A read-only account used to look users up. User passwords are sent only to the directory and are never stored.</p>
+  <label>Bind DN<input name="bind_dn" value="{{ config.bind_dn }}" placeholder="CN=svc-gns3-portal,OU=Service Accounts,DC=corp,DC=example,DC=com" required></label>
+  <label>Password<input name="bind_password" type="password" autocomplete="new-password" placeholder="{% if config.bind_password_enc %}Stored encrypted. Leave blank to keep it.{% else %}Service account password{% endif %}" {% if not config.bind_password_enc %}required{% endif %}></label>
+  <hr><h2>Users and groups</h2>
+  <label>User search base<input name="user_base_dn" value="{{ config.user_base_dn }}" placeholder="OU=Users,DC=corp,DC=example,DC=com" required></label>
+  <label>User filter<input name="user_filter" class="mono" value="{{ config.user_filter }}"><span class="small">{username} is replaced with the escaped sign-in name.</span></label>
+  <div class="form-row"><label>Username attribute<input name="username_attribute" value="{{ config.username_attribute }}"></label><label>Group search base<input name="group_base_dn" value="{{ config.group_base_dn }}" placeholder="OU=Groups,DC=corp,DC=example,DC=com"></label></div>
+  <div class="form-row"><label>Group filter<input name="group_filter" class="mono" value="{{ config.group_filter }}"></label><label class="inline-check" style="flex:0 1 auto"><input type="checkbox" name="nested_groups" value="1" {% if config.nested_groups %}checked{% endif %}> Include nested groups</label></div>
+  {{ default_role_select(config.default_role) }}
+  {% else %}
+  <hr><h2>Identity provider</h2>
+  <input type="hidden" name="preset" value="{{ config.preset }}">
+  <label>Federation metadata XML<textarea name="idp_metadata_xml" rows="5" class="mono" placeholder="Paste the IdP metadata XML to fill in the three fields below"></textarea><span class="small">{% if config.preset == 'entra' %}Entra admin centre › Enterprise applications › your app › Single sign-on › Federation Metadata XML.{% elif config.preset == 'okta' %}Okta Admin › Applications › your app › Sign On › Metadata URL (open it and copy the XML).{% elif config.preset == 'adfs' %}https://your-adfs/FederationMetadata/2007-06/FederationMetadata.xml{% else %}Download it from your identity provider.{% endif %}</span></label>
+  <label>IdP entity ID<input name="idp_entity_id" value="{{ config.idp_entity_id }}"></label>
+  <label>Sign-in URL (HTTP-Redirect)<input name="idp_sso_url" value="{{ config.idp_sso_url }}" placeholder="https://"></label>
+  <label>Signing certificate<textarea name="idp_x509_cert" rows="4" class="mono">{{ config.idp_x509_cert }}</textarea>{% if cert_fingerprint %}<span class="small mono">SHA-256 {{ cert_fingerprint }}</span>{% endif %}</label>
+  <hr><h2>Attributes</h2>
+  <p class="muted" style="margin:0">Leave blank to use the {{ presets.get(config.preset, presets.other).label }} default shown. The username comes from the NameID unless a username attribute is set.</p>
+  {% set preset = presets.get(config.preset, presets.other) %}
+  <div class="form-row"><label>Username<input name="username_attribute" value="{{ config.username_attribute }}" placeholder="{{ preset.username_attribute or 'NameID' }}"></label><label>Email<input name="email_attribute" value="{{ config.email_attribute }}" placeholder="{{ preset.email_attribute }}"></label></div>
+  <div class="form-row"><label>First name<input name="first_name_attribute" value="{{ config.first_name_attribute }}" placeholder="{{ preset.first_name_attribute }}"></label><label>Last name<input name="last_name_attribute" value="{{ config.last_name_attribute }}" placeholder="{{ preset.last_name_attribute }}"></label></div>
+  <label>Groups<input name="groups_attribute" value="{{ config.groups_attribute }}" placeholder="{{ preset.groups_attribute }}">{% if config.preset == 'entra' %}<span class="small">Entra sends group object IDs. Map groups by object ID below.</span>{% endif %}</label>
+  {{ default_role_select(config.default_role) }}
+  {% endif %}
+  <div><button class="primary big">Save provider</button></div>
+</form>
+
+<div class="narrow">
+  {% if not is_ldap %}
+  <section class="card form-stack">
+    <h2>Give these to your identity provider</h2>
+    {% if sp_entity_id %}
+    <label>Identifier (Entity ID)<input class="mono" value="{{ sp_entity_id }}" readonly></label>
+    <label>Reply URL (Assertion Consumer Service)<input class="mono" value="{{ sp_acs_url }}" readonly></label>
+    <a class="button" href="/auth/saml/{{ pid }}/metadata" target="_blank" rel="noopener">Download SP metadata</a>
+    {% elif not public_url %}<p class="muted" style="margin:0">Set PORTAL_PUBLIC_URL first.</p>{% else %}<p class="muted" style="margin:0">Save the provider to see its URLs.</p>{% endif %}
+  </section>
+  {% endif %}
+  {% if pid and is_ldap %}
+  <form class="card form-stack" method="post" action="/admin/identity/{{ pid }}/test">
+    <h2>Test the connection</h2>
+    <label>Look up a user (optional)<input name="sample_user" placeholder="jsmith"></label>
+    <button>Run test</button>
+  </form>
+  {% endif %}
+  {% if pid %}
+  <form class="card form-stack danger-zone" method="post" action="/admin/identity/{{ pid }}/delete" onsubmit="return confirm('Delete this provider? Its users will not be able to sign in.')">
+    <h2>Delete provider</h2>
+    <p class="muted" style="margin:0">Its users stay in the portal, with their labs, but cannot sign in until another provider is set up for them.</p>
+    <label><span>Type <span class="mono" style="color:var(--ink)">{{ pid }}</span> to confirm</span><input name="confirmation" autocomplete="off" required></label>
+    <button class="danger">Delete provider</button>
+  </form>
+  {% endif %}
+</div>
+</div>
+
+{% if pid %}
+<section class="table-card" aria-labelledby="map-heading">
+  <div class="card-head" style="padding:14px 16px 0"><h2 id="map-heading">Group → role mappings</h2></div>
+  <table class="data responsive">
+    <thead><tr><th scope="col">Group</th><th scope="col">Role</th><th scope="col">Added by</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+    <tbody>{% for mapping in mappings %}
+      <tr><td class="primary-cell"><span class="cell-title">{{ mapping.group_name }}</span><div class="cell-meta mono" style="word-break:break-all">{{ mapping.group_id }}</div></td><td data-label="Role">{{ mapping.role_key | role_name }}</td><td data-label="Added by">{{ mapping.created_by }}</td>
+      <td class="actions"><form method="post" action="/admin/identity/{{ pid }}/mappings/remove"><input type="hidden" name="group_id" value="{{ mapping.group_id }}"><input type="hidden" name="role_key" value="{{ mapping.role_key }}"><button class="link">Remove</button></form></td></tr>
+    {% else %}<tr><td class="empty" colspan="4">No groups mapped. {% if not config.default_role %}Nobody can sign in with this provider until a group is mapped.{% endif %}</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  <form class="form-row" style="padding:14px 16px;border-top:1px solid var(--line)" method="post" action="/admin/identity/{{ pid }}/mappings">
+    <label>Group {{ 'DN' if is_ldap else ('object ID' if config.preset == 'entra' else 'name') }}<input name="group_id" class="mono" required placeholder="{{ 'CN=GNS3-Admins,OU=Groups,DC=corp,DC=example,DC=com' if is_ldap else ('00000000-0000-0000-0000-000000000000' if config.preset == 'entra' else 'GNS3-Admins') }}"></label>
+    <label style="flex:0 1 220px">Label<input name="group_name" placeholder="Friendly name"></label>
+    <label style="flex:0 1 220px">Role<select name="role_key">{% for key, role in ROLES.items() %}<option value="{{ key }}" {% if key == 'lab_editor' %}selected{% endif %}>{{ role[0] }}</option>{% endfor %}</select></label>
+    <button class="primary big">Map group</button>
+  </form>
+</section>
+{% if is_ldap %}
+<section class="card form-stack" style="max-width:none">
+  <h2>Find directory groups</h2>
+  <form class="form-row" method="get" action="/admin/identity/{{ pid }}"><label>Group name contains<input name="group_search" value="{{ group_search }}"></label><button class="big">Search</button></form>
+  {% if group_error %}<p class="error">{{ group_error }}</p>{% endif %}
+  {% if groups %}<div class="table-card"><table class="data responsive"><tbody>{% for group in groups %}<tr><td class="primary-cell"><span class="cell-title">{{ group.name }}</span><div class="cell-meta mono" style="word-break:break-all">{{ group.group_id }}</div></td><td class="actions"><form class="row-actions" method="post" action="/admin/identity/{{ pid }}/mappings"><input type="hidden" name="group_id" value="{{ group.group_id }}"><input type="hidden" name="group_name" value="{{ group.name }}"><select name="role_key" aria-label="Role for {{ group.name }}">{% for key, role in ROLES.items() %}<option value="{{ key }}" {% if key == 'lab_editor' %}selected{% endif %}>{{ role[0] }}</option>{% endfor %}</select><button>Map</button></form></td></tr>{% endfor %}</tbody></table></div>
+  {% elif group_search %}<p class="muted">No groups found.</p>{% endif %}
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}
