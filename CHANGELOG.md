@@ -4,6 +4,21 @@ All notable portal changes are documented here. Versions before v7.6 were
 delivered as cumulative update packages; v8.6.1 is the current cumulative
 source release.
 
+## v9.0.0-dev — Phase 1: MariaDB and audit logging (in development)
+
+- Run the portal on SQLite or MariaDB through one database layer
+  (`portal_db.py`), selected with `PORTAL_DB_BACKEND`.
+- Add versioned MariaDB migrations, `scripts/setup-mariadb.sh` (least-privilege
+  accounts, server audit plugin), and a verified, re-runnable
+  SQLite-to-MariaDB data migration.
+- Record source IP, user agent, request ID and outcome with every audit event;
+  audit failed logins.
+- On MariaDB, make audit tables append-only and record a change history (old
+  and new values, without password hashes) for users, lab ownership, shares,
+  retained backups and templates.
+- Hash passwords with Argon2id and upgrade v8.x scrypt hashes at sign-in.
+- Add automated tests for both database backends.
+
 ## v8.6.1 — Monitoring compute discovery fix
 
 - Discover the registered GNS3 compute instead of treating the WebUI server

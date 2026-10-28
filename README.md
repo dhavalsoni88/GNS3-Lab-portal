@@ -10,6 +10,34 @@ the complete development and release history.
 > [config/ldap.env.example](config/ldap.env.example). Do not deploy it as a
 > v9.0 upgrade until the implementation and migration code are released.
 
+## Moving to MariaDB
+
+SQLite remains the default for a single small server. MariaDB is required
+for multi-server clusters and provides tamper-resistant audit logging. See
+[database/README.md](database/README.md).
+
+1. Install the new requirements, then prepare MariaDB:
+
+   ```bash
+   sudo /opt/gns3-lab-portal/.venv/bin/pip install -r /opt/gns3-lab-portal/requirements.txt
+   sudo bash /opt/gns3-lab-portal/scripts/setup-mariadb.sh
+   ```
+
+2. Stop the portal, then copy the SQLite data. The script backs up
+   `audit.db` first, verifies every row, and can be re-run safely.
+
+   ```bash
+   sudo systemctl stop gns3-lab-portal
+   sudo env PORTAL_DB_HOST=localhost PORTAL_DB_MIGRATE_USER=gns3_portal_migrate PORTAL_DB_MIGRATE_PASSWORD_FILE=/etc/gns3-lab-portal/db-migrate-password /opt/gns3-lab-portal/.venv/bin/python /opt/gns3-lab-portal/scripts/migrate-sqlite-to-mariadb.py --sqlite /opt/gns3-lab-portal/data/audit.db
+   ```
+
+3. Add the `PORTAL_DB_*` lines that `setup-mariadb.sh` printed to `.env`,
+   then start the portal. Users sign in again, because sessions are not
+   copied.
+
+To return to SQLite, set `PORTAL_DB_BACKEND=sqlite`. The original
+`audit.db` is not modified by the migration.
+
 ## Local users, roles, and lab ownership
 
 This release adds local portal accounts with **admin** and **user** roles.
@@ -17,8 +45,9 @@ Set `PORTAL_AUTH_ENABLED=true` before starting the portal. On its first start,
 the existing `PORTAL_USERNAME` and `PORTAL_PASSWORD` values create the initial
 Administrator account. Afterwards, manage users at **Admin** in the header.
 
-Passwords are stored as salted `scrypt` hashes in the portal SQLite database;
-they are never stored in plain text in the database. Keep a long random
+Passwords are stored as Argon2id hashes. Hashes created by v8.x (`scrypt`)
+are upgraded to Argon2id automatically when each user next signs in.
+Passwords are never stored in plain text. Keep a long random
 `PORTAL_SECRET_KEY` and use HTTPS before exposing the portal outside a trusted
 network.
 

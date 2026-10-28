@@ -8,7 +8,6 @@ import logging
 import os
 import secrets
 import shutil
-import sqlite3
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -24,6 +23,11 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
+
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
+
+import portal_db as db
 
 BASE_DIR = Path(__file__).resolve().parent
 GNS3_URL = os.getenv("GNS3_URL", "http://192.168.10.10:3080").rstrip("/")
@@ -41,7 +45,9 @@ SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
 AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_IDLE_SECONDS = max(60, int(os.getenv("PORTAL_SESSION_IDLE_SECONDS", "1800")))
 SESSION_MAX_SECONDS = max(SESSION_IDLE_SECONDS, int(os.getenv("PORTAL_SESSION_MAX_SECONDS", "28800")))
-AUDIT_DB = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
+PORTAL_DB_AUTO_MIGRATE = os.getenv("PORTAL_DB_AUTO_MIGRATE", "false").strip().lower() in {"1", "true", "yes", "on"}
+# Reverse proxies whose X-Forwarded-For header is trusted for audit source IPs.
+PORTAL_TRUSTED_PROXIES = frozenset(item.strip() for item in os.getenv("PORTAL_TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if item.strip())
 UPLOAD_DIR = Path(os.getenv("PORTAL_UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
 USER_AVATAR_DIR = Path(os.getenv("PORTAL_AVATAR_DIR", str(BASE_DIR / "data" / "avatars"))).expanduser()
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
@@ -70,6 +76,8 @@ PORTAL_LOG_RETENTION_DAYS = max(1, int(os.getenv("PORTAL_LOG_RETENTION_DAYS", "1
 PORTAL_LOG_LEVEL = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
 PORTAL_MONITOR_DISKS = tuple(name for name in (item.strip() for item in os.getenv("PORTAL_MONITOR_DISKS", "sda,sdb").split(",")) if name and name.replace("-", "").replace("_", "").isalnum())
 GNS3_MONITOR_COMPUTE_ID = os.getenv("GNS3_MONITOR_COMPUTE_ID", "").strip()
+# argon2-cffi defaults follow RFC 9106's second recommended (memory-constrained) profile.
+password_hasher = PasswordHasher()
 portal_logger = logging.getLogger("gns3_lab_portal")
 api_logger = logging.getLogger("gns3_lab_portal.gns3_api")
 
@@ -175,69 +183,22 @@ def safe_avatar_path(filename: str | None) -> Path | None:
 
 
 def init_db() -> None:
-    AUDIT_DB.parent.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     USER_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     RETAINED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     LAB_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
-            action TEXT NOT NULL, target TEXT NOT NULL, details TEXT
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS portal_users (
-            username TEXT PRIMARY KEY COLLATE NOCASE, password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS portal_sessions (
-            session_id_hash TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
-            issued_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-            server_epoch TEXT NOT NULL
-        )""")
-        connection.execute("CREATE INDEX IF NOT EXISTS portal_sessions_username ON portal_sessions(username)")
+    if db.BACKEND == "mariadb":
+        # In production the application account has no DDL rights; the
+        # installer applies migrations with the separate migration account.
+        if PORTAL_DB_AUTO_MIGRATE:
+            db.apply_mariadb_migrations()
+        pending = db.pending_mariadb_migrations()
+        if pending:
+            raise RuntimeError(f"MariaDB schema migrations are pending: {', '.join(pending)}. Run: python3 portal_db.py migrate")
+    with db.connect() as connection:
+        if db.BACKEND == "sqlite":
+            init_sqlite_schema(connection)
         connection.execute("DELETE FROM portal_sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
-        user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
-        for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
-            if name not in user_columns:
-                column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
-                connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
-            project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
-            assigned_at TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS retained_backups (
-            backup_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
-            source_project_id TEXT NOT NULL, source_lab_name TEXT NOT NULL,
-            backup_name TEXT NOT NULL, archive_path TEXT NOT NULL UNIQUE,
-            size_bytes INTEGER NOT NULL, retained_at TEXT NOT NULL
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_shares (
-            project_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
-            shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
-            PRIMARY KEY(project_id, username)
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS backup_shares (
-            project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
-            shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
-            PRIMARY KEY(project_id, snapshot_id, username)
-        )""")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
-            template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
-            source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
-            name TEXT NOT NULL, description TEXT, archive_path TEXT, size_bytes INTEGER,
-            created_at TEXT NOT NULL,
-            UNIQUE(source_project_id, snapshot_id)
-        )""")
-        template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
-        for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER"), ("approval_status", "TEXT NOT NULL DEFAULT 'approved'"), ("approved_by", "TEXT"), ("approved_at", "TEXT")):
-            if name not in template_columns:
-                connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
-        connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
-            template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
-            subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
-            granted_at TEXT NOT NULL, PRIMARY KEY(template_id, subject_type, subject_id)
-        )""")
         # Preserve the prior deployment path: the existing environment login
         # becomes the first local administrator on the first RBAC startup.
         existing = connection.execute("SELECT 1 FROM portal_users LIMIT 1").fetchone()
@@ -248,17 +209,82 @@ def init_db() -> None:
             )
 
 
-def audit(actor: str, action: str, target: str, details: dict[str, Any] | None = None) -> None:
-    with sqlite3.connect(AUDIT_DB) as connection:
+def init_sqlite_schema(connection: db.Connection) -> None:
+    """Create or upgrade the SQLite schema. MariaDB uses database/mariadb/*.sql."""
+    connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
+        action TEXT NOT NULL, target TEXT NOT NULL, details TEXT
+    )""")
+    audit_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_log)")}
+    for name, column_type in (("source_ip", "TEXT"), ("user_agent", "TEXT"), ("request_id", "TEXT"), ("outcome", "TEXT NOT NULL DEFAULT 'success'")):
+        if name not in audit_columns:
+            connection.execute(f"ALTER TABLE audit_log ADD COLUMN {name} {column_type}")
+    connection.execute("""CREATE TABLE IF NOT EXISTS portal_users (
+        username TEXT PRIMARY KEY COLLATE NOCASE, password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS portal_sessions (
+        session_id_hash TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
+        issued_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+        server_epoch TEXT NOT NULL
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS portal_sessions_username ON portal_sessions(username)")
+    user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
+    for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
+        if name not in user_columns:
+            column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
+            connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
+        project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
+        assigned_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS retained_backups (
+        backup_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
+        source_project_id TEXT NOT NULL, source_lab_name TEXT NOT NULL,
+        backup_name TEXT NOT NULL, archive_path TEXT NOT NULL UNIQUE,
+        size_bytes INTEGER NOT NULL, retained_at TEXT NOT NULL
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_shares (
+        project_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
+        shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, username)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS backup_shares (
+        project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
+        shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, snapshot_id, username)
+    )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
+        template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
+        source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
+        name TEXT NOT NULL, description TEXT, archive_path TEXT, size_bytes INTEGER,
+        created_at TEXT NOT NULL,
+        UNIQUE(source_project_id, snapshot_id)
+    )""")
+    template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
+    for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER"), ("approval_status", "TEXT NOT NULL DEFAULT 'approved'"), ("approved_by", "TEXT"), ("approved_at", "TEXT")):
+        if name not in template_columns:
+            connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
+    connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
+        template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
+        subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
+        granted_at TEXT NOT NULL, PRIMARY KEY(template_id, subject_type, subject_id)
+    )""")
+
+
+def audit(actor: str, action: str, target: str, details: dict[str, Any] | None = None, outcome: str = "success") -> None:
+    context = db.current_context()
+    with db.connect() as connection:
         connection.execute(
-            "INSERT INTO audit_log(timestamp, actor, action, target, details) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now(timezone.utc).isoformat(), actor, action, target, json.dumps(details or {})),
+            "INSERT INTO audit_log(timestamp, actor, action, target, details, source_ip, user_agent, request_id, outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), actor[:255], action, target[:512], json.dumps(details or {}),
+             context.get("source_ip") or None, (context.get("user_agent") or "")[:512] or None, context.get("request_id") or None, outcome),
         )
 
 
 def recent_audit(limit: int = 20, username: str | None = None, include_all: bool = False) -> list[dict[str, str]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         if include_all or not username:
             rows = connection.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         else:
@@ -267,12 +293,25 @@ def recent_audit(limit: int = 20, username: str | None = None, include_all: bool
 
 
 def password_hash(password: str) -> str:
-    salt = os.urandom(16)
-    digest = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
-    return "scrypt$" + base64.b64encode(salt).decode() + "$" + base64.b64encode(digest).decode()
+    return password_hasher.hash(password)
+
+
+def password_needs_rehash(stored: str) -> bool:
+    """v8.x scrypt hashes, and Argon2id hashes with old parameters, are upgraded at login."""
+    if not stored.startswith("$argon2id$"):
+        return True
+    try:
+        return password_hasher.check_needs_rehash(stored)
+    except InvalidHashError:
+        return True
 
 
 def password_matches(password: str, stored: str) -> bool:
+    if stored.startswith("$argon2"):
+        try:
+            return password_hasher.verify(stored, password)
+        except (VerificationError, InvalidHashError):
+            return False
     try:
         scheme, salt_b64, digest_b64 = stored.split("$", 2)
         if scheme != "scrypt":
@@ -285,8 +324,7 @@ def password_matches(password: str, stored: str) -> bool:
 
 
 def user_record(username: str) -> dict[str, Any] | None:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         row = connection.execute("SELECT username,password_hash,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit FROM portal_users WHERE username=?", (username,)).fetchone()
     return dict(row) if row else None
 
@@ -306,56 +344,54 @@ def account_has_avatar(username: str) -> bool:
 
 
 def list_users() -> list[dict[str, Any]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute("SELECT username,role,enabled,created_at,email,first_name,last_name,avatar_filename,retained_backup_limit FROM portal_users ORDER BY username COLLATE NOCASE").fetchall()
     return [dict(row) for row in rows]
 
 
 def enabled_admin_count() -> int:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         row = connection.execute("SELECT COUNT(*) FROM portal_users WHERE role='admin' AND enabled=1").fetchone()
     return int(row[0])
 
 
 def lab_owner(project_id: str) -> str | None:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         row = connection.execute("SELECT username FROM lab_owners WHERE project_id=?", (project_id,)).fetchone()
     return str(row[0]) if row else None
 
 
 def set_lab_owner(project_id: str, username: str) -> None:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO lab_owners(project_id,username,assigned_at) VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET username=excluded.username, assigned_at=excluded.assigned_at", (project_id, username, datetime.now(timezone.utc).isoformat()))
 
 
 def owned_project_ids(username: str) -> set[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT project_id FROM lab_owners WHERE username=?", (username,)).fetchall()
     return {str(row[0]) for row in rows}
 
 
 def shared_project_ids(username: str) -> set[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT project_id FROM lab_shares WHERE username=?", (username,)).fetchall()
     return {str(row[0]) for row in rows}
 
 
 def shared_users(project_id: str) -> list[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT username FROM lab_shares WHERE project_id=? ORDER BY username COLLATE NOCASE", (project_id,)).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def backup_shared_users(project_id: str, snapshot_id: str) -> list[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT username FROM backup_shares WHERE project_id=? AND snapshot_id=? ORDER BY username COLLATE NOCASE", (project_id, snapshot_id)).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def backup_shares_for(username: str) -> list[dict[str, str]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute("SELECT project_id,snapshot_id,shared_by,shared_at FROM backup_shares WHERE username=? ORDER BY shared_at DESC", (username,)).fetchall()
     return [dict(row) for row in rows]
 
@@ -365,8 +401,7 @@ def retained_backups_for(username: str | None = None) -> list[dict[str, Any]]:
     if username:
         query += " WHERE owner=?"; values = (username,)
     query += " ORDER BY retained_at DESC"
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute(query, values).fetchall()
     return [dict(row) for row in rows]
 
@@ -377,14 +412,13 @@ def retained_backup_limit(username: str) -> int:
 
 
 def retained_backup_count(username: str) -> int:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         row = connection.execute("SELECT COUNT(*) FROM retained_backups WHERE owner=?", (username,)).fetchone()
     return int(row[0])
 
 
 def templates_for_user(username: str, include_owned: bool = False) -> list[dict[str, Any]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         if include_owned:
             rows = connection.execute("SELECT * FROM lab_templates ORDER BY created_at DESC").fetchall()
         else:
@@ -393,21 +427,19 @@ def templates_for_user(username: str, include_owned: bool = False) -> list[dict[
 
 
 def approved_templates() -> list[dict[str, Any]]:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         rows = connection.execute("SELECT * FROM lab_templates WHERE approval_status='approved' ORDER BY created_at DESC").fetchall()
     return [dict(row) for row in rows]
 
 
 def template_access_users(template_id: str) -> list[str]:
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         rows = connection.execute("SELECT subject_id FROM lab_template_access WHERE template_id=? AND subject_type='local_user' ORDER BY subject_id COLLATE NOCASE", (template_id,)).fetchall()
     return [str(row[0]) for row in rows]
 
 
 def template_record(template_id: str) -> dict[str, Any] | None:
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         row = connection.execute("SELECT * FROM lab_templates WHERE template_id=?", (template_id,)).fetchone()
     return dict(row) if row else None
 
@@ -443,6 +475,34 @@ app = FastAPI(title="GNS3 Lab Portal", lifespan=lifespan)
 # the authoritative security control.
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False, same_site="lax", max_age=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+
+class AuditContextMiddleware:
+    """Record the client IP, user agent and a request ID for audit events."""
+
+    def __init__(self, app_instance: Any):
+        self.app = app_instance
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
+        client_ip = (scope.get("client") or ("", 0))[0] or ""
+        forwarded = headers.get("x-forwarded-for", "")
+        if forwarded and client_ip in PORTAL_TRUSTED_PROXIES:
+            client_ip = forwarded.split(",")[0].strip()
+        token = db.request_context.set({
+            "source_ip": client_ip[:45], "user_agent": headers.get("user-agent", "")[:512],
+            "request_id": uuid.uuid4().hex, "actor": "",
+        })
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            db.request_context.reset(token)
+
+
+app.add_middleware(AuditContextMiddleware)
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 templates.env.globals["auth_enabled"] = AUTH_ENABLED
 templates.env.filters["storage_size"] = format_storage_size
@@ -455,7 +515,7 @@ def session_token_hash(token: str) -> str:
 def revoke_portal_session(request: Request) -> None:
     token = str(request.session.get("sid") or "")
     if token:
-        with sqlite3.connect(AUDIT_DB) as connection:
+        with db.connect() as connection:
             connection.execute("DELETE FROM portal_sessions WHERE session_id_hash=?", (session_token_hash(token),))
     request.session.clear()
 
@@ -465,8 +525,7 @@ def active_portal_session(request: Request) -> dict[str, Any] | None:
     if not token:
         return None
     now = datetime.now(timezone.utc)
-    with sqlite3.connect(AUDIT_DB) as connection:
-        connection.row_factory = sqlite3.Row
+    with db.connect() as connection:
         row = connection.execute(
             "SELECT username,issued_at,last_seen_at,expires_at,server_epoch FROM portal_sessions WHERE session_id_hash=?",
             (session_token_hash(token),),
@@ -494,7 +553,7 @@ def create_portal_session(request: Request, username: str) -> None:
     now = datetime.now(timezone.utc)
     token = secrets.token_urlsafe(32)
     expires_at = now.timestamp() + SESSION_MAX_SECONDS
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         # One active session per user prevents a previously copied token from
         # remaining valid after that user signs in again.
         connection.execute("DELETE FROM portal_sessions WHERE username=?", (username,))
@@ -527,6 +586,8 @@ def signed_in_user(request: Request) -> str:
     if not account or not account.get("enabled"):
         revoke_portal_session(request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    impersonating = request.session.get("impersonating")
+    db.current_context()["actor"] = f"{account['username']} impersonating {impersonating}" if impersonating else str(account["username"])
     return str(account["username"])
 
 
@@ -999,7 +1060,7 @@ async def run_snapshot_import_job(job: dict[str, Any]) -> None:
         # the new project is created successfully; a failed import remains
         # retryable and does not remove the share.
         if source_project_id and snapshot_id and job.get("consume_backup_share"):
-            with sqlite3.connect(AUDIT_DB) as connection:
+            with db.connect() as connection:
                 connection.execute(
                     "DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=? AND username=?",
                     (source_project_id, snapshot_id, str(job["actor"])),
@@ -1104,7 +1165,14 @@ async def login(request: Request, username: str = Form(...), password: str = For
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     account = user_record(username.strip())
     if not account or not account.get("enabled") or not password_matches(password, str(account.get("password_hash", ""))):
+        reason = "unknown_user" if not account else "disabled" if not account.get("enabled") else "bad_password"
+        audit(username.strip()[:255] or "(blank)", "login_failed", "portal", {"reason": reason}, outcome="failure")
         return templates.TemplateResponse(request, "login.html", {"error": "Invalid username or password.", "login_page": True}, status_code=401)
+    db.current_context()["actor"] = str(account["username"])
+    if password_needs_rehash(str(account["password_hash"])):
+        with db.connect() as connection:
+            connection.execute("UPDATE portal_users SET password_hash=? WHERE username=?", (password_hash(password), account["username"]))
+        audit(str(account["username"]), "password_rehashed", str(account["username"]), {"scheme": "argon2id"})
     create_portal_session(request, str(account["username"]))
     audit(str(account["username"]), "login", "portal", {"role": account["role"]})
     return RedirectResponse("/", status_code=303)
@@ -1189,7 +1257,7 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
             return RedirectResponse("/profile?error=The+portal+could+not+save+the+profile+photo", status_code=303)
     previous_avatar = str(account.get("avatar_filename") or "")
     avatar_filename = new_avatar_filename or (None if remove_avatar == "remove" else previous_avatar or None)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         if new_password:
             connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,avatar_filename=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, avatar_filename, password_hash(new_password), username))
         else:
@@ -1218,9 +1286,9 @@ async def admin_create_user(request: Request, username: str = Form(...), passwor
     if not username or len(username) > 80 or any(char.isspace() for char in username) or role not in {"admin", "user"} or len(password) < 12:
         return RedirectResponse("/admin/users?error=Use+a+username+without+spaces%2C+a+valid+role%2C+and+a+password+of+at+least+12+characters", status_code=303)
     try:
-        with sqlite3.connect(AUDIT_DB) as connection:
+        with db.connect() as connection:
             connection.execute("INSERT INTO portal_users(username,password_hash,role,enabled,created_at) VALUES(?,?,?,?,?)", (username, password_hash(password), role, 1, datetime.now(timezone.utc).isoformat()))
-    except sqlite3.IntegrityError:
+    except db.IntegrityError:
         return RedirectResponse("/admin/users?error=That+username+already+exists", status_code=303)
     audit(audit_actor(request), "create_user", username, {"role": role})
     return RedirectResponse("/admin/users?message=User+created", status_code=303)
@@ -1239,7 +1307,7 @@ async def admin_update_user(request: Request, username: str, role: str = Form(..
         return RedirectResponse("/admin/users?error=You+cannot+disable+your+own+account", status_code=303)
     if target.get("role") == "admin" and target.get("enabled") and (role != "admin" or enabled != "1") and enabled_admin_count() <= 1:
         return RedirectResponse("/admin/users?error=At+least+one+enabled+Administrator+must+remain", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         if password:
             if len(password) < 12:
                 return RedirectResponse("/admin/users?error=Passwords+must+be+at+least+12+characters", status_code=303)
@@ -1290,7 +1358,7 @@ async def share_lab(request: Request, project_id: str, username: str = Form(...)
     owner = lab_owner(project_id)
     if not target or not target.get("enabled") or target["username"] == owner:
         return RedirectResponse("/?error=Choose+another+enabled+portal+user", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO lab_shares(project_id,username,shared_by,shared_at) VALUES(?,?,?,?) ON CONFLICT(project_id,username) DO UPDATE SET shared_by=excluded.shared_by, shared_at=excluded.shared_at", (project_id, target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "share_lab", project_id, {"shared_with": target["username"]})
     return RedirectResponse("/?message=Lab+shared", status_code=303)
@@ -1301,7 +1369,7 @@ async def remove_lab_share(request: Request, project_id: str, username: str):
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can change sharing.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_shares WHERE project_id=? AND username=?", (project_id, username))
     audit(audit_actor(request), "remove_lab_share", project_id, {"user": username})
     return RedirectResponse("/?message=Lab+sharing+updated", status_code=303)
@@ -1318,7 +1386,7 @@ async def share_backup(request: Request, project_id: str, snapshot_id: str, user
     snapshots = await gns3("GET", f"/v2/projects/{project_id}/snapshots")
     if not any(str(item.get("snapshot_id")) == snapshot_id for item in snapshots):
         raise HTTPException(404, "Backup not found.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO backup_shares(project_id,snapshot_id,username,shared_by,shared_at) VALUES(?,?,?,?,?) ON CONFLICT(project_id,snapshot_id,username) DO UPDATE SET shared_by=excluded.shared_by, shared_at=excluded.shared_at", (project_id, snapshot_id, target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "share_backup", project_id, {"snapshot_id": snapshot_id, "shared_with": target["username"]})
     return RedirectResponse(f"/projects/{project_id}?message=Backup+shared", status_code=303)
@@ -1329,7 +1397,7 @@ async def remove_backup_share(request: Request, project_id: str, snapshot_id: st
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can change backup sharing.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=? AND username=?", (project_id, snapshot_id, username))
     audit(audit_actor(request), "remove_backup_share", project_id, {"snapshot_id": snapshot_id, "user": username})
     return RedirectResponse(f"/projects/{project_id}?message=Backup+sharing+updated", status_code=303)
@@ -1358,12 +1426,12 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
         await asyncio.to_thread(shutil.copy2, source, destination)
         if destination.stat().st_size != source.stat().st_size:
             raise OSError("Template archive size verification failed")
-        with sqlite3.connect(AUDIT_DB) as connection:
+        with db.connect() as connection:
             status_value = "approved" if has_admin_scope(request) else "pending"
             approved_by = audit_actor(request) if status_value == "approved" else None
             approved_at = datetime.now(timezone.utc).isoformat() if status_value == "approved" else None
             connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at,approval_status,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat(), status_value, approved_by, approved_at))
-    except sqlite3.IntegrityError:
+    except db.IntegrityError:
         shutil.rmtree(template_dir, ignore_errors=True)
         return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template", status_code=303)
     except OSError:
@@ -1382,7 +1450,7 @@ async def grant_template_access(request: Request, template_id: str, username: st
     target = user_record(username.strip())
     if not target or not target.get("enabled"):
         return RedirectResponse(f"/projects/{template['source_project_id']}?error=Choose+an+enabled+portal+user", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("INSERT INTO lab_template_access(template_id,subject_type,subject_id,granted_by,granted_at) VALUES(?,?,?,?,?) ON CONFLICT(template_id,subject_type,subject_id) DO UPDATE SET granted_by=excluded.granted_by,granted_at=excluded.granted_at", (template_id, "local_user", target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
     audit(audit_actor(request), "grant_lab_template", template["source_project_id"], {"template_id": template_id, "username": target["username"]})
     return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+shared", status_code=303)
@@ -1393,7 +1461,7 @@ async def revoke_template_access(request: Request, template_id: str, username: s
     template = template_record(template_id)
     if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
         raise HTTPException(404, "Lab template not found.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_template_access WHERE template_id=? AND subject_type='local_user' AND subject_id=?", (template_id, username))
     audit(audit_actor(request), "revoke_lab_template", template["source_project_id"], {"template_id": template_id, "username": username})
     return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+access+updated", status_code=303)
@@ -1404,7 +1472,7 @@ async def unpublish_template(request: Request, template_id: str):
     template = template_record(template_id)
     if not template or (not has_admin_scope(request) and template["owner"] != current_user(request)):
         raise HTTPException(404, "Lab template not found.")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_template_access WHERE template_id=?", (template_id,))
         connection.execute("DELETE FROM lab_templates WHERE template_id=?", (template_id,))
     archive_path = Path(str(template.get("archive_path") or ""))
@@ -1425,7 +1493,7 @@ async def approve_template(request: Request, template_id: str):
         raise HTTPException(404, "Lab template not found.")
     if template.get("approval_status") == "approved":
         return RedirectResponse("/?message=Lab+template+is+already+approved", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("UPDATE lab_templates SET approval_status='approved',approved_by=?,approved_at=? WHERE template_id=?", (audit_actor(request), datetime.now(timezone.utc).isoformat(), template_id))
     audit(audit_actor(request), "approve_lab_template", template["source_project_id"], {"template_id": template_id, "name": template["name"], "owner": template["owner"]})
     return RedirectResponse("/?message=Lab+template+approved+and+published", status_code=303)
@@ -1897,7 +1965,7 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
         await gns3("DELETE", f"/v2/projects/{project_id}/snapshots/{snapshot_id}")
     except HTTPException as exc:
         return RedirectResponse(f"/projects/{project_id}?error={quote_plus(str(exc.detail))}", status_code=303)
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=?", (project_id, snapshot_id))
     audit(audit_actor(request), "delete_snapshot", project_id, {"snapshot_id": snapshot_id})
     return RedirectResponse(f"/projects/{project_id}", status_code=303)
@@ -1925,7 +1993,7 @@ async def delete_selected_snapshots(request: Request, project_id: str, snapshot_
             failed += 1
             portal_logger.warning("bulk_snapshot_delete_failed project_id=%s snapshot_id=%s", project_id, snapshot_id)
             continue
-        with sqlite3.connect(AUDIT_DB) as connection:
+        with db.connect() as connection:
             connection.execute("DELETE FROM backup_shares WHERE project_id=? AND snapshot_id=?", (project_id, snapshot_id))
         deleted.append(snapshot_id)
     if deleted:
@@ -1966,11 +2034,11 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
             backup_id = str(uuid.uuid4())
             destination = target_dir / f"{backup_id}.gns3snapshot"
             await asyncio.to_thread(shutil.copy2, source, destination)
-            with sqlite3.connect(AUDIT_DB) as connection:
+            with db.connect() as connection:
                 connection.execute("INSERT INTO retained_backups(backup_id,owner,source_project_id,source_lab_name,backup_name,archive_path,size_bytes,retained_at) VALUES(?,?,?,?,?,?,?,?)", (backup_id, user, project_id, str(project.get("name", "Lab")), str(snapshot.get("name", "Unnamed backup")), str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat()))
             retained += 1
     await gns3("DELETE", f"/v2/projects/{project_id}")
-    with sqlite3.connect(AUDIT_DB) as connection:
+    with db.connect() as connection:
         connection.execute("DELETE FROM lab_owners WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM lab_shares WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM backup_shares WHERE project_id=?", (project_id,))
