@@ -1,10 +1,15 @@
 # Changelog
 
-All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.6.1 is the current cumulative
-source release.
+All notable changes to the GNS3 Lab Portal are recorded here, newest first.
+Releases up to v8.6 were delivered as update packages; their install steps
+are kept under **Upgrade notes**. For upgrading an installation, see
+[docs/upgrading.md](docs/upgrading.md).
 
-## v9.0.0-dev — Phase 1: MariaDB and audit logging (in development)
+## Unreleased — v9.0.0
+
+In development; see the [roadmap](docs/roadmap.md).
+
+### Database and audit
 
 - Run the portal on SQLite or MariaDB through one database layer
   (`portal_db.py`), selected with `PORTAL_DB_BACKEND`.
@@ -18,6 +23,9 @@ source release.
   retained backups and templates.
 - Hash passwords with Argon2id and upgrade v8.x scrypt hashes at sign-in.
 - Add automated tests for both database backends.
+
+### Interface
+
 - Replace the portal layout with the "console" design: a sidebar
   (Labs, New lab, Templates, Activity/Audit log, Server status, Users), a
   labs list with status, node counts, last backup, filters and search, and
@@ -27,7 +35,15 @@ source release.
   and the server monitor to Server status.
 - Make every table usable on phones (rows become cards); add dark mode.
 - Return to the lab page after starting, stopping, sharing or renaming it.
-- Show backup dates when GNS3 reports them as Unix timestamps.
+- Show backup dates when GNS3 reports them as Unix timestamps, or without a
+  completion time.
+- Show server memory from GNS3's `memory_usage_percent`; it previously read
+  "Unavailable".
+- Show the error page, or the sign-in page, to browsers instead of raw JSON
+  errors.
+
+### Roles and sign-in
+
 - Add seven roles (Platform Admin, Lab Manager, Template Approver, Lab
   Editor, Lab Operator, Viewer, Auditor), enforced on every lab, backup,
   template, user, audit and server-status action. v8.x admins become
@@ -41,6 +57,20 @@ source release.
 - Restrict restoring and deleting backups, and deleting labs, to the lab
   owner or a Lab Manager.
 
+### Deployment and repository
+
+- Add `PORTAL_COOKIE_SECURE` to send the session cookie only over HTTPS.
+- Change the built-in `GNS3_URL` default to `http://127.0.0.1:3080`. Set it
+  explicitly in `.env`.
+- Move the systemd unit to `deploy/systemd/` and the snapshot migration
+  script to `scripts/`; add an Nginx example in `deploy/nginx/`.
+- Reorganise documentation into `docs/`, fold the per-release `UPDATE-*.md`
+  notes into this changelog, and add contribution, security and CI files.
+- Remove the superseded v9.0 planning files (`config/ldap.env.example`,
+  draft MariaDB schema) and the roadmap web page, now `docs/roadmap.md`.
+- Fix the v8.6.1 dashboard, whose monitoring panel replaced all of the page's
+  other scripts.
+
 ## v8.6.1 — Monitoring compute discovery fix
 
 - Discover the registered GNS3 compute instead of treating the WebUI server
@@ -51,6 +81,10 @@ source release.
 - Add an Administrator-only CPU and memory monitoring panel with a short CPU trend graph.
 - Mark memory use at 75% as warning and 90% as critical.
 - Show aggregate read/write counters and current rates for configured local block devices.
+
+Upgrade notes: optionally set `PORTAL_MONITOR_DISKS` to the block devices to
+show (for example `sda,sdb`; whole disks, not partitions such as `sda1`;
+check with `lsblk -d -o NAME,SIZE,MODEL`).
 
 ## v8.5.9 — Administrator-approved templates
 
@@ -67,12 +101,17 @@ source release.
 - Invalidate all existing sessions after a portal service restart.
 - Revoke sessions on logout and when the same user signs in again.
 
+Upgrade notes: every user signs in again after the restart.
+
 ## v8.5.7 — Profile photos
 
 - Let each signed-in user upload, replace, or remove a profile photo from My
   Profile.
 - Accept validated JPG, PNG, and WebP images up to 2 MiB only.
 - Store photos privately and serve them only to the signed-in account.
+
+Upgrade notes: create the private photo directory before restarting:
+`sudo install -d -o www-data -g www-data -m 0750 /opt/gns3-lab-portal/data/avatars`.
 
 ## v8.5.6 — Dismissible account menu
 
@@ -106,6 +145,11 @@ source release.
 - Continue showing size and completion time for safe local snapshot folders,
   so legacy backups remain visible before migration.
 
+Upgrade notes: keep `GNS3_PROJECTS_DIR` and `GNS3_SNAPSHOTS_DIR` set, apply
+the write ACLs in [docs/storage.md](docs/storage.md#permissions), then create
+a test lab and confirm its `snapshots` entry is a symlink into the snapshot
+root. Migrate existing labs with the script while GNS3 is stopped.
+
 ## v8.5.2 — Backup layout, size scan, and local time
 
 - Tighten the Lab Backup action layout and permit horizontal scrolling on small
@@ -113,6 +157,11 @@ source release.
 - Resolve dedicated-HDD snapshot directories before scanning their contents.
 - Render backup completion and audit timestamps in each user's browser-local
   timezone instead of UTC.
+
+Upgrade notes: set `GNS3_PROJECTS_DIR`, `GNS3_SNAPSHOTS_DIR`,
+`RETAINED_BACKUP_DIR` and `LAB_TEMPLATE_DIR` to the real mounted paths and
+grant `www-data` read access to the project and snapshot folders. No server
+time-zone change is needed.
 
 ## v8.5.1 — Independent template archive
 

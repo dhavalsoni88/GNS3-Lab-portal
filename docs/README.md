@@ -1,13 +1,13 @@
-# Publish this page with GitHub Pages
+# Documentation
 
-1. Copy this `docs` directory into the root of the `GNS3-Lab-portal` GitHub
-   repository.
-2. Commit and push it to the `main` branch.
-3. On GitHub, open **Settings → Pages**.
-4. Under **Build and deployment**, select **Deploy from a branch**.
-5. Select branch `main`, folder `/docs`, then select **Save**.
-6. GitHub displays the published address after deployment. It is normally
-   `https://dhavalsoni88.github.io/GNS3-Lab-portal/`.
-
-The page has no external libraries or trackers. It is a single responsive HTML
-file with inline CSS and SVG flowcharts, so it works directly on GitHub Pages.
+| Guide | Covers |
+|---|---|
+| [Installation](installation.md) | Prerequisites, install, service, reverse proxy, verification |
+| [Configuration](configuration.md) | Every `.env` setting |
+| [User guide](user-guide.md) | Labs, backups, sharing, templates, retained backups |
+| [Authentication](authentication.md) | Roles, local accounts, Active Directory, Entra ID, Okta, ADFS |
+| [Database](database.md) | SQLite and MariaDB, audit layer, moving to MariaDB |
+| [Storage](storage.md) | Snapshot storage on a separate disk, permissions |
+| [Operations](operations.md) | Logs, monitoring, safeguards, troubleshooting |
+| [Upgrading](upgrading.md) | Updating an installation and version-specific steps |
+| [Roadmap](roadmap.md) | Delivered and planned phases |
