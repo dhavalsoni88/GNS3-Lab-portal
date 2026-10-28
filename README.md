@@ -1,7 +1,14 @@
 # GNS3 Lab Portal
 
-Current cumulative release: **v8.5.9**. See [CHANGELOG.md](CHANGELOG.md) for
+Current cumulative release: **v8.6.1**. See [CHANGELOG.md](CHANGELOG.md) for
 the complete development and release history.
+
+> **v9.0 preparation.** The runnable portal in this repository is the stable
+> v8.6.1 baseline. The v9.0 MariaDB, LDAPS, role, and phpMyAdmin design is
+> documented in [V9.0-IMPLEMENTATION-PLAN.md](V9.0-IMPLEMENTATION-PLAN.md),
+> with the draft schema in [database/](database/) and LDAPS settings in
+> [config/ldap.env.example](config/ldap.env.example). Do not deploy it as a
+> v9.0 upgrade until the implementation and migration code are released.
 
 ## Local users, roles, and lab ownership
 

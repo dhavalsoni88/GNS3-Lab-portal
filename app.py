@@ -68,6 +68,8 @@ SNAPSHOT_ESTIMATED_SECONDS = max(60.0, float(os.getenv("SNAPSHOT_ESTIMATED_SECON
 PORTAL_LOG_DIR = Path(os.getenv("PORTAL_LOG_DIR", str(BASE_DIR / "logs"))).expanduser()
 PORTAL_LOG_RETENTION_DAYS = max(1, int(os.getenv("PORTAL_LOG_RETENTION_DAYS", "14")))
 PORTAL_LOG_LEVEL = os.getenv("PORTAL_LOG_LEVEL", "INFO").upper()
+PORTAL_MONITOR_DISKS = tuple(name for name in (item.strip() for item in os.getenv("PORTAL_MONITOR_DISKS", "sda,sdb").split(",")) if name and name.replace("-", "").replace("_", "").isalnum())
+GNS3_MONITOR_COMPUTE_ID = os.getenv("GNS3_MONITOR_COMPUTE_ID", "").strip()
 portal_logger = logging.getLogger("gns3_lab_portal")
 api_logger = logging.getLogger("gns3_lab_portal.gns3_api")
 
@@ -83,6 +85,31 @@ def format_storage_size(size_bytes: int | float | None) -> str:
         value /= 1024
         index += 1
     return f"{int(value)} {units[index]}" if index == 0 else f"{value:.2f} {units[index]}"
+
+
+def numeric_value(data: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
+
+
+def disk_io_counters(device_names: tuple[str, ...]) -> dict[str, dict[str, int]]:
+    counters: dict[str, dict[str, int]] = {}
+    try:
+        lines = Path("/proc/diskstats").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return counters
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 10 or fields[2] not in device_names:
+            continue
+        try:
+            counters[fields[2]] = {"read_bytes": int(fields[5]) * 512, "write_bytes": int(fields[9]) * 512}
+        except ValueError:
+            continue
+    return counters
 
 
 def gns3_webui_project_url(project_id: str) -> str:
@@ -403,6 +430,7 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.gns3_client = httpx.AsyncClient(timeout=timeout, auth=auth, limits=limits)
     app_instance.state.backup_jobs = {}
     app_instance.state.import_jobs = {}
+    app_instance.state.monitor_disk_samples = {}
     try:
         yield
     finally:
@@ -1482,6 +1510,36 @@ async def dashboard(request: Request):
         "gns3_url": GNS3_URL, "audit": recent_audit(username=current_user(request), include_all=has_admin_scope(request)),
         "import_job_id": request.query_params.get("import_job", ""),
     })
+
+
+@app.get("/admin/system-status")
+async def administrator_system_status(request: Request):
+    if AUTH_ENABLED and not has_admin_scope(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access is required.")
+    try:
+        computes = await gns3("GET", "/v2/computes")
+        if not isinstance(computes, list) or not computes:
+            return {"available": False, "message": "No GNS3 compute is registered.", "disks": {}}
+        compute = next((item for item in computes if str(item.get("compute_id", item.get("id", ""))) == GNS3_MONITOR_COMPUTE_ID), None) if GNS3_MONITOR_COMPUTE_ID else computes[0]
+        compute_id = str(compute.get("compute_id", compute.get("id", ""))) if isinstance(compute, dict) else ""
+        if compute_id:
+            compute = await gns3("GET", f"/v2/computes/{quote(compute_id, safe='')}")
+    except HTTPException as exc:
+        return {"available": False, "message": str(exc.detail), "disks": {}}
+    if not isinstance(compute, dict):
+        return {"available": False, "message": "GNS3 returned an unexpected system-status response.", "disks": {}}
+    cpu_percent = numeric_value(compute, "cpu_usage", "cpu_usage_percent", "cpu_percent")
+    memory_total = numeric_value(compute, "memory_total", "memory_total_bytes")
+    memory_used = numeric_value(compute, "memory_usage", "memory_used", "memory_used_bytes")
+    if memory_total and memory_used is not None and memory_used <= 100 and memory_total > 1024:
+        memory_used = memory_total * memory_used / 100
+    now = perf_counter(); current = disk_io_counters(PORTAL_MONITOR_DISKS); previous = app.state.monitor_disk_samples
+    disks: dict[str, dict[str, float | int | None]] = {}
+    for device, values in current.items():
+        old = previous.get(device); elapsed = max(0.001, now - float(old.get("sampled_at", now))) if old else 0.0
+        disks[device] = {**values, "read_bytes_per_second": max(0.0, (values["read_bytes"] - int(old["read_bytes"])) / elapsed) if old else None, "write_bytes_per_second": max(0.0, (values["write_bytes"] - int(old["write_bytes"])) / elapsed) if old else None}
+    app.state.monitor_disk_samples = {device: {**values, "sampled_at": now} for device, values in current.items()}
+    return {"available": cpu_percent is not None or memory_total is not None, "cpu_percent": cpu_percent, "memory_total_bytes": int(memory_total) if memory_total is not None else None, "memory_used_bytes": int(memory_used) if memory_used is not None else None, "disks": disks, "message": "" if (cpu_percent is not None or memory_total is not None) else "This GNS3 server did not provide CPU or memory status."}
 
 
 @app.post("/projects")

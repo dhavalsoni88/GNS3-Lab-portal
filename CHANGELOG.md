@@ -1,8 +1,19 @@
 # Changelog
 
 All notable portal changes are documented here. Versions before v7.6 were
-delivered as cumulative update packages; v8.5.9 is the current cumulative
+delivered as cumulative update packages; v8.6.1 is the current cumulative
 source release.
+
+## v8.6.1 — Monitoring compute discovery fix
+
+- Discover the registered GNS3 compute instead of treating the WebUI server
+  route number as a compute ID.
+
+## v8.6.0 — Administrator server monitoring
+
+- Add an Administrator-only CPU and memory monitoring panel with a short CPU trend graph.
+- Mark memory use at 75% as warning and 90% as critical.
+- Show aggregate read/write counters and current rates for configured local block devices.
 
 ## v8.5.9 — Administrator-approved templates
 
