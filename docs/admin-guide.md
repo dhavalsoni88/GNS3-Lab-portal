@@ -60,6 +60,30 @@ Use **Lab Operator** for people who only start and stop labs, and
 
 - **Labs without an owner** (made directly in GNS3) show *Needs an owner*.
   Assign one from the lab's ⋯ menu; until then only Lab Managers see them.
+- **Lab limit:** each user may own 2 labs by default. Change it per user
+  with **Labs allowed** on the Users page. Every lab they own counts, running
+  or stopped, and so does a lab still being created from a backup. The limit
+  is checked before anything is created, for empty labs, backups, templates
+  and uploads alike. Platform Admins and Lab Managers are not limited.
+- **Templates for everyone from any lab:** open the lab, then **Backups ›
+  Stop nodes and back up**. When the backup is complete, tick it and choose
+  **Make template**. A template made by a Platform Admin or Template
+  Approver is published at once and appears for every user under **New lab
+  › From a template**; anyone else's waits under **Templates** for approval.
+  The portal keeps its own copy, so deleting the lab or backup later does not
+  affect the template. This needs `GNS3_PROJECTS_DIR` set so the portal can
+  read snapshot files ([configuration.md](configuration.md)).
+- **Appliances:** **Administration › Appliances** publishes a GNS3 appliance
+  to every lab:
+  - Choose its `.gns3a` file (from the GNS3 marketplace or the vendor),
+    optionally a version, and the disk images that version needs.
+  - The portal checks each image against the checksum in the appliance file,
+    uploads only images GNS3 does not have yet, and registers the template.
+    Every lab can use it at once.
+  - Existing templates and images are never changed or replaced. Publishing
+    refuses a template name that exists, or a different image with the same
+    file name, because labs may already use them.
+  - QEMU appliances only for now. Only Platform Admins can publish.
 - **Templates waiting for approval** appear under **Templates** for Template
   Approvers and Platform Admins. Approving publishes the template to
   everyone.

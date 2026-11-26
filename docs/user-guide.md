@@ -51,6 +51,11 @@ the copy is made.
 
 New labs belong to the person who created them.
 
+You can own up to **2 labs** unless an administrator gave you more. **New
+lab** shows how many you have. To make room, delete a lab you no longer need
+(keep its backups when you delete it if you may want it back), or ask an
+administrator to raise your limit.
+
 ## The lab page
 
 ![A lab's Backups tab](images/lab-backups.png)

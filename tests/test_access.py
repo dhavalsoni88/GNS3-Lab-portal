@@ -214,3 +214,129 @@ def test_saml_sign_in_starts_are_capped():
         store.put(f"relay-{n}", "idp", f"id-{n}")
     with pytest.raises(auth.IdentityError):
         store.put("relay-3", "idp", "id-3")
+
+
+def test_stopping_a_closed_lab_never_opens_it(client):
+    calls = []
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/open"):
+            return httpx.Response(409, json={"message": "The image winserver2019.qcow2 is missing", "status": 409})
+        if request.url.path.endswith("/nodes"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json={"project_id": "lab-owned", "name": "Owner Lab", "status": "closed"})
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    try:
+        login(client, "owner1", "owner1-password-1")
+        stop = client.post("/projects/lab-owned/stop", data={"return_to": "/projects/lab-owned"}, follow_redirects=False)
+        assert "message=" in stop.headers["location"] and not any(path.endswith("/open") for _, path in calls)
+        # Starting still has to open it, and shows GNS3's own reason when that fails.
+        start = client.post("/projects/lab-owned/start", data={"return_to": "/projects/lab-owned"}, follow_redirects=False)
+        assert "winserver2019.qcow2+is+missing" in start.headers["location"]
+        client.post("/logout")
+    finally:
+        portal.app.state.gns3_client = original
+
+
+def test_lab_limit_is_checked_before_any_lab_is_created(client):
+    created = []
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v2/projects":
+            created.append(request.url.path)
+            return httpx.Response(201, json={"project_id": f"new-{len(created)}", "name": "New", "path": "/tmp/none"})
+        if request.url.path.startswith("/v2/projects/"):
+            return httpx.Response(200, json={"project_id": request.url.path.rsplit("/", 1)[-1], "name": "New", "path": "/tmp/none"})
+        return httpx.Response(200, json=[])
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    try:
+        login(client, "portaladmin", "initial-admin-password")
+        owned = len(portal.owned_project_ids("other1"))
+        client.post("/admin/users/other1/update", data={"roles": ["lab_editor"], "enabled": "1", "retained_backup_limit": "2", "lab_limit": str(owned)})
+        client.post("/logout")
+        login(client, "other1", "other1-password-1")
+        assert f"of {owned} labs" in client.get("/labs/new").text
+        refused = client.post("/projects", data={"name": "One too many"}, follow_redirects=False)
+        assert "limit" in refused.headers["location"] and created == []          # GNS3 never asked
+        refused_import = client.post("/retained-backup-imports", data={"backup_id": "none", "name": "x"}, follow_redirects=False)
+        assert "error=" in refused_import.headers["location"] and created == []
+        client.post("/logout")
+
+        login(client, "portaladmin", "initial-admin-password")
+        client.post("/admin/users/other1/update", data={"roles": ["lab_editor"], "enabled": "1", "retained_backup_limit": "2", "lab_limit": str(owned + 1)})
+        # A form without the field keeps the limit instead of resetting it.
+        client.post("/admin/users/other1/update", data={"roles": ["lab_editor"], "enabled": "1", "retained_backup_limit": "2"})
+        assert portal.lab_limit("other1") == owned + 1
+        client.post("/logout")
+        login(client, "other1", "other1-password-1")
+        assert "/projects/new-1" in client.post("/projects", data={"name": "Allowed now"}, follow_redirects=False).headers["location"]
+        client.post("/logout")
+    finally:
+        portal.app.state.gns3_client = original
+
+
+def test_publishing_an_appliance_adds_images_and_template_without_replacing_anything(client):
+    import hashlib
+    import json as jsonlib
+    image = b"QFI\xfb fake disk image"
+    appliance = {
+        "name": "Win Server", "category": "guest", "registry_version": 4,
+        "qemu": {"adapter_type": "e1000", "adapters": 2, "ram": 4096, "arch": "x86_64", "console_type": "vnc", "kvm": "require"},
+        "images": [{"filename": "winserver2019.qcow2", "version": "2019", "md5sum": hashlib.md5(image).hexdigest()}],
+        "versions": [{"name": "2019", "images": {"hda_disk_image": "winserver2019.qcow2"}}],
+    }
+    state = {"templates": [{"name": "Existing router", "template_type": "qemu", "category": "router"}], "images": [], "uploads": [], "posted": []}
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v2/templates" and request.method == "GET":
+            return httpx.Response(200, json=state["templates"])
+        if path == "/v2/templates" and request.method == "POST":
+            state["posted"].append(jsonlib.loads(request.content))
+            return httpx.Response(201, json={})
+        if path == "/v2/computes/local/qemu/images":
+            return httpx.Response(200, json=state["images"])
+        if path.startswith("/v2/computes/local/qemu/images/"):
+            state["uploads"].append((path.rsplit("/", 1)[-1], request.content))
+            return httpx.Response(204)
+        return httpx.Response(404, json={})
+
+    def publish(image_bytes=image, appliance_json=appliance):
+        files = [("appliance_file", ("win.gns3a", jsonlib.dumps(appliance_json).encode(), "application/json"))]
+        if image_bytes is not None:
+            files.append(("image_files", ("winserver2019.qcow2", image_bytes, "application/octet-stream")))
+        return client.post("/admin/appliances", files=files, follow_redirects=False).headers["location"]
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    try:
+        login(client, "owner1", "owner1-password-1")
+        assert client.post("/admin/appliances", files=[("appliance_file", ("a.gns3a", b"{}", "application/json"))]).status_code == 403
+        client.post("/logout")
+        login(client, "portaladmin", "initial-admin-password")
+        assert "checksum" in publish(image_bytes=b"tampered") and state["uploads"] == [] and state["posted"] == []
+        assert "Also+upload" in publish(image_bytes=None) and state["posted"] == []
+
+        assert "message=Published" in publish()
+        assert state["uploads"] == [("winserver2019.qcow2", image)]
+        template = state["posted"][0]
+        assert template["name"] == "Win Server 2019" and template["hda_disk_image"] == "winserver2019.qcow2"
+        assert template["ram"] == 4096 and template["platform"] == "x86_64" and "kvm" not in template
+
+        # Publishing never replaces: a same-named template or a different image with the same name is refused.
+        state["templates"].append({"name": "Win Server 2019"})
+        assert "already+exists" in publish()
+        state["templates"].pop()
+        state["images"] = [{"filename": "winserver2019.qcow2", "md5sum": "0" * 32}]
+        assert "never+replaced" in publish() and len(state["uploads"]) == 1 and len(state["posted"]) == 1
+        # The same image already on GNS3 is reused, not uploaded again.
+        state["images"] = [{"filename": "winserver2019.qcow2", "md5sum": hashlib.md5(image).hexdigest()}]
+        assert "message=Published" in publish(image_bytes=None) and len(state["uploads"]) == 1
+        client.post("/logout")
+    finally:
+        portal.app.state.gns3_client = original

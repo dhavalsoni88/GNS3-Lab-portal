@@ -40,6 +40,7 @@
             <a class="nav-link" href="/admin/users" {% if active == 'users' %}aria-current="page"{% endif %}>Users</a>
             <a class="nav-link" href="/admin/roles" {% if active == 'roles' %}aria-current="page"{% endif %}>Roles &amp; groups</a>
             <a class="nav-link" href="/admin/identity" {% if active == 'identity' %}aria-current="page"{% endif %}>Identity providers</a>
+            {% if admin_can(request, 'appliances.publish') %}<a class="nav-link" href="/admin/appliances" {% if active == 'appliances' %}aria-current="page"{% endif %}>Appliances</a>{% endif %}
           </div>
           {% endif %}
         </nav>
