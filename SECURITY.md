@@ -20,7 +20,7 @@ for a fix before any disclosure.
 
 | Version | Supported |
 |---|---|
-| v9.0 (development) | Yes |
+| v9.0 | Yes |
 | v8.6 | Security fixes |
 | Older | No |
 
@@ -30,7 +30,9 @@ for a fix before any disclosure.
   the portal host can reach it, and do not publish the GNS3 web interface to
   untrusted users.
 - **Use HTTPS.** Serve the portal through TLS, set
-  `PORTAL_COOKIE_SECURE=true`, and keep `PORTAL_AUTH_ENABLED=true`.
+  `PORTAL_PUBLIC_URL=https://…` (this also makes the session cookie
+  HTTPS-only), and keep `PORTAL_AUTH_ENABLED=true`.
+- **Rate-limit sign-in.** Keep the `limit_req` lines from the Nginx sample.
 - **Protect the secret key.** Use a long random `PORTAL_SECRET_KEY`. Keep
   `.env` readable only by root and the service group.
 - **Keep a break-glass account.** Keep at least one local Platform Admin with

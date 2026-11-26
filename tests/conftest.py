@@ -28,6 +28,8 @@ os.environ.update({
     "LAB_TEMPLATE_DIR": str(TMP / "templates"),
     "PORTAL_LOG_DIR": str(TMP / "logs"),
     "PORTAL_PUBLIC_URL": "https://portal.test.example",
+    # The test client speaks plain http; an https public URL would otherwise mark the cookie Secure.
+    "PORTAL_COOKIE_SECURE": "false",
 })
 os.environ.update({"PORTAL_DB_BACKEND": "mariadb", "PORTAL_DB_NAME": "gns3_portal_test", "PORTAL_DB_AUTO_MIGRATE": "true"})
 import portal_db  # noqa: E402

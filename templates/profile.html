@@ -7,10 +7,13 @@
     <h2>Details</h2>
     <div class="form-row"><label>First name<input name="first_name" maxlength="80" value="{{ profile.first_name or '' }}"></label><label>Last name<input name="last_name" maxlength="80" value="{{ profile.last_name or '' }}"></label></div>
     <label>Email address<input name="email" type="email" maxlength="254" value="{{ profile.email or '' }}"></label>
+    {% if (profile.auth_source or 'local') == 'local' %}
     <hr>
     <h2>Change password</h2>
-    <p class="muted" style="margin:0">Leave both fields blank to keep your current password.</p>
+    <p class="muted" style="margin:0">Leave these fields blank to keep your current password. Changing it signs you out on every other device.</p>
+    <label>Current password<input name="current_password" type="password" autocomplete="current-password"></label>
     <div class="form-row"><label>New password<input name="new_password" type="password" minlength="12" autocomplete="new-password" placeholder="At least 12 characters"></label><label>Confirm new password<input name="confirm_new_password" type="password" minlength="12" autocomplete="new-password"></label></div>
+    {% endif %}
     <div><button class="primary big">Save profile</button></div>
   </section>
   <section class="card narrow form-stack">

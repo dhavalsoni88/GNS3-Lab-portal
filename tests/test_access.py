@@ -159,3 +159,58 @@ def test_delete_lab_keeps_backups_only_when_the_whole_delete_succeeds(client, tm
     assert portal.retained_backup_count("owner1") == before + 2 and portal.lab_owner("lab-del") is None
     client.post("/logout")
     portal.app.state.gns3_client = original_client
+
+
+def test_password_change_needs_current_password_and_reset_signs_user_out(client):
+    other_device = TestClient(portal.app)  # no lifespan: shares the running app and its sessions
+    login(client, "owner1", "owner1-password-1")
+    form = {"new_password": "owner1-password-2", "confirm_new_password": "owner1-password-2"}
+    wrong = client.post("/profile", data={**form, "current_password": "not-it"}, follow_redirects=False)
+    assert "Current+password+is+incorrect" in wrong.headers["location"]
+    right = client.post("/profile", data={**form, "current_password": "owner1-password-1"}, follow_redirects=False)
+    assert "message=" in right.headers["location"]
+    assert client.get("/profile", follow_redirects=False).status_code == 200  # still signed in
+    client.post("/logout")
+
+    # An admin reset also signs the user out everywhere.
+    login(other_device, "owner1", "owner1-password-2")
+    login(client, "portaladmin", "initial-admin-password")
+    client.post("/admin/users/owner1/update", data={"roles": ["lab_editor"], "enabled": "1", "password": "owner1-password-1", "retained_backup_limit": "2"})
+    assert other_device.get("/profile", follow_redirects=False).status_code == 303
+    client.post("/logout")
+
+
+def test_cross_site_posts_are_refused_but_saml_responses_are_not(client):
+    assert client.post("/logout", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.post("/logout", headers={"Origin": "http://testserver"}, follow_redirects=False).status_code == 303
+    # The identity provider posts from its own site; SAML signatures protect that route.
+    assert client.post("/auth/saml/none/acs", headers={"Origin": "https://idp.example"}).status_code == 404
+
+
+def test_dot_segments_never_reach_the_gns3_api():
+    import asyncio
+    from fastapi import HTTPException
+    for path in ("/v2/projects/lab-1/snapshots/..", "/v2/projects/./x", "/v2/projects/a?b=1"):
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(portal.gns3("DELETE", path))
+        assert refused.value.status_code == 400
+
+
+def test_import_job_status_is_only_for_the_person_who_started_it(client):
+    portal.app.state.import_jobs["job-owner1"] = {"actor": "owner1", "source_project_id": "", "status": "importing", "progress_percent": 50, "message": "", "project_id": None}
+    login(client, "other1", "other1-password-1")
+    assert client.get("/backup-import-jobs/job-owner1").status_code == 404
+    client.post("/logout")
+    login(client, "owner1", "owner1-password-1")
+    assert client.get("/backup-import-jobs/job-owner1").status_code == 200
+    client.post("/logout")
+
+
+def test_saml_sign_in_starts_are_capped():
+    import portal_auth as auth
+    store = auth.SamlRequestStore()
+    store.MAX_PENDING = 3
+    for n in range(3):
+        store.put(f"relay-{n}", "idp", f"id-{n}")
+    with pytest.raises(auth.IdentityError):
+        store.put("relay-3", "idp", "id-3")

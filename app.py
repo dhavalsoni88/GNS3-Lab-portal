@@ -15,11 +15,11 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-from urllib.parse import quote, quote_plus
+from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
 from fastapi import File, FastAPI, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -48,7 +48,7 @@ SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
 # Required for SAML: it forms the SP entity ID and the assertion consumer URL.
 PORTAL_PUBLIC_URL = os.getenv("PORTAL_PUBLIC_URL", "").strip().rstrip("/")
 # Send the session cookie only over HTTPS. Enable once the portal is behind TLS.
-PORTAL_COOKIE_SECURE = os.getenv("PORTAL_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
+PORTAL_COOKIE_SECURE = os.getenv("PORTAL_COOKIE_SECURE", str(PORTAL_PUBLIC_URL.startswith("https://"))).strip().lower() in {"1", "true", "yes", "on"}
 AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_IDLE_SECONDS = max(60, int(os.getenv("PORTAL_SESSION_IDLE_SECONDS", "1800")))
 SESSION_MAX_SECONDS = max(SESSION_IDLE_SECONDS, int(os.getenv("PORTAL_SESSION_MAX_SECONDS", "28800")))
@@ -377,7 +377,7 @@ def templates_for_user(username: str, include_owned: bool = False) -> list[dict[
         if include_owned:
             rows = connection.execute("SELECT * FROM lab_templates ORDER BY created_at DESC").fetchall()
         else:
-            rows = connection.execute("SELECT DISTINCT t.* FROM lab_templates t LEFT JOIN lab_template_access a ON a.template_id=t.template_id WHERE t.owner=? OR (t.approval_status='approved' AND a.subject_type='local_user' AND a.subject_id=?) ORDER BY t.created_at DESC", (username, username)).fetchall()
+            rows = connection.execute("SELECT * FROM lab_templates WHERE owner=? ORDER BY created_at DESC", (username,)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -385,12 +385,6 @@ def approved_templates() -> list[dict[str, Any]]:
     with db.connect() as connection:
         rows = connection.execute("SELECT * FROM lab_templates WHERE approval_status='approved' ORDER BY created_at DESC").fetchall()
     return [dict(row) for row in rows]
-
-
-def template_access_users(template_id: str) -> list[str]:
-    with db.connect() as connection:
-        rows = connection.execute("SELECT subject_id FROM lab_template_access WHERE template_id=? AND subject_type='local_user' ORDER BY subject_id COLLATE NOCASE", (template_id,)).fetchall()
-    return [str(row[0]) for row in rows]
 
 
 def template_record(template_id: str) -> dict[str, Any] | None:
@@ -447,6 +441,13 @@ class AuditContextMiddleware:
             await self.app(scope, receive, send)
             return
         headers = {key.decode("latin-1").lower(): value.decode("latin-1") for key, value in scope.get("headers", [])}
+        # SameSite=Lax still lets sibling subdomains post forms, so check where a post came from.
+        # SAML responses are posted by the identity provider, a different site, and are signed instead.
+        origin = headers.get("origin")
+        if scope["method"] == "POST" and origin and not scope["path"].startswith("/auth/saml/") \
+                and urlsplit(origin).netloc not in {headers.get("host", ""), urlsplit(PORTAL_PUBLIC_URL).netloc}:
+            await PlainTextResponse("Cross-site request refused.", status_code=403)(scope, receive, send)
+            return
         client_ip = (scope.get("client") or ("", 0))[0] or ""
         forwarded = headers.get("x-forwarded-for", "")
         if forwarded and client_ip in PORTAL_TRUSTED_PROXIES:
@@ -631,12 +632,15 @@ def redirect_login() -> RedirectResponse:
 
 
 async def gns3(method: str, path: str, **kwargs: Any) -> Any:
+    # IDs from the URL go into this path: "snapshots/.." would otherwise become a lab delete.
+    if any(part in {".", ".."} for part in path.split("/")) or "?" in path or "#" in path:
+        raise HTTPException(400, "Invalid lab or backup identifier.")
     started = perf_counter()
     try:
         response = await app.state.gns3_client.request(method, f"{GNS3_URL}{path}", **kwargs)
     except httpx.RequestError as exc:
         api_logger.error("request method=%s path=%s outcome=request_error duration_ms=%d error=%s", method, path, int((perf_counter() - started) * 1000), safe_api_detail(exc))
-        raise HTTPException(503, f"Cannot reach the GNS3 server: {exc}") from exc
+        raise HTTPException(503, "Cannot reach the GNS3 server. An administrator can find details in gns3-api.log.") from exc
     duration_ms = int((perf_counter() - started) * 1000)
     if response.status_code >= 400:
         try:
@@ -644,7 +648,7 @@ async def gns3(method: str, path: str, **kwargs: Any) -> Any:
         except ValueError:
             detail = response.text
         api_logger.warning("request method=%s path=%s status=%s duration_ms=%d detail=%s", method, path, response.status_code, duration_ms, safe_api_detail(detail))
-        raise HTTPException(response.status_code, f"GNS3 rejected the request: {detail}")
+        raise HTTPException(response.status_code, f"GNS3 refused the request (HTTP {response.status_code}). An administrator can find details in gns3-api.log.")
     api_logger.info("request method=%s path=%s status=%s duration_ms=%d", method, path, response.status_code, duration_ms)
     return response.json() if response.content else None
 
@@ -971,8 +975,8 @@ async def stream_project_export(project_id: str):
     async with httpx.AsyncClient(timeout=timeout, auth=gns3_auth) as client:
         async with client.stream("GET", f"{GNS3_URL}/v2/projects/{project_id}/export") as response:
             if response.status_code >= 400:
-                detail = (await response.aread()).decode(errors="replace")
-                raise HTTPException(response.status_code, f"GNS3 rejected the export request: {detail}")
+                api_logger.warning("export_failed project_id=%s status=%s detail=%s", project_id, response.status_code, safe_api_detail((await response.aread()).decode(errors="replace")))
+                raise HTTPException(response.status_code, f"GNS3 refused the export (HTTP {response.status_code}).")
             async for chunk in response.aiter_bytes():
                 yield chunk
 
@@ -1010,13 +1014,11 @@ async def import_snapshot_as_new_project(job: dict[str, Any], snapshot_path: Pat
                 headers={"Content-Type": "application/gns3project"},
             )
     except httpx.RequestError as exc:
-        raise HTTPException(503, f"Cannot reach the GNS3 server: {exc}") from exc
+        api_logger.error("import_request_error error=%s", safe_api_detail(exc))
+        raise HTTPException(503, "Cannot reach the GNS3 server. An administrator can find details in gns3-api.log.") from exc
     if response.status_code >= 400:
-        try:
-            detail = response.json()
-        except ValueError:
-            detail = response.text
-        raise HTTPException(response.status_code, f"GNS3 rejected the import request: {detail}")
+        api_logger.warning("import_failed status=%s detail=%s", response.status_code, safe_api_detail(response.text))
+        raise HTTPException(response.status_code, f"GNS3 refused the import (HTTP {response.status_code}). An administrator can find details in gns3-api.log.")
     return response.json()
 
 
@@ -1324,7 +1326,10 @@ async def saml_login(request: Request, provider_id: str):
     saml = saml_auth_for(request, provider)
     relay = auth.SamlRequestStore.new_relay_token()
     url = saml.login(return_to=relay)
-    app.state.saml_requests.put(relay, provider_id, saml.get_last_request_id())
+    try:
+        app.state.saml_requests.put(relay, provider_id, saml.get_last_request_id())
+    except auth.IdentityError as exc:
+        raise HTTPException(503, str(exc)) from exc
     return RedirectResponse(url, status_code=303)
 
 
@@ -1411,7 +1416,7 @@ async def profile_avatar(request: Request):
 
 
 @app.post("/profile")
-async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), new_password: str = Form(""), confirm_new_password: str = Form(""), avatar_file: UploadFile | None = File(None), remove_avatar: str = Form("")):
+async def update_profile(request: Request, email: str = Form(""), first_name: str = Form(""), last_name: str = Form(""), new_password: str = Form(""), confirm_new_password: str = Form(""), current_password: str = Form(""), avatar_file: UploadFile | None = File(None), remove_avatar: str = Form("")):
     if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
     username = signed_in_user(request)
@@ -1428,6 +1433,11 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
             return RedirectResponse("/profile?error=New+password+must+be+at+least+12+characters", status_code=303)
         if new_password != confirm_new_password:
             return RedirectResponse("/profile?error=New+passwords+do+not+match", status_code=303)
+        if account.get("auth_source", "local") != "local":
+            return RedirectResponse("/profile?error=Change+your+password+with+your+directory+or+single+sign-on+provider", status_code=303)
+        # A stolen or unattended session must not be enough to take the account over.
+        if not await asyncio.to_thread(password_matches, current_password, str(account.get("password_hash", ""))):
+            return RedirectResponse("/profile?error=Current+password+is+incorrect", status_code=303)
     elif confirm_new_password:
         return RedirectResponse("/profile?error=Enter+the+new+password+in+both+fields", status_code=303)
     new_avatar_filename: str | None = None
@@ -1456,6 +1466,8 @@ async def update_profile(request: Request, email: str = Form(""), first_name: st
             connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,avatar_filename=?,password_hash=? WHERE username=?", (email or None, first_name or None, last_name or None, avatar_filename, password_hash(new_password), username))
         else:
             connection.execute("UPDATE portal_users SET email=?,first_name=?,last_name=?,avatar_filename=? WHERE username=?", (email or None, first_name or None, last_name or None, avatar_filename, username))
+    if new_password:
+        create_portal_session(request, username)  # fresh session token after a password change
     if previous_avatar and previous_avatar != avatar_filename:
         old_path = safe_avatar_path(previous_avatar)
         if old_path:
@@ -1521,6 +1533,10 @@ async def admin_update_user(request: Request, username: str, roles: list[str] = 
         else:
             connection.execute("UPDATE portal_users SET enabled=?,retained_backup_limit=? WHERE username=?", (1 if is_enabled else 0, retained_backup_limit, target["username"]))
     auth.set_direct_roles(target["username"], chosen)
+    if password:
+        # A reset usually follows a compromise: sign the account out everywhere.
+        with db.connect() as connection:
+            connection.execute("DELETE FROM portal_sessions WHERE username=?", (target["username"],))
     audit(audit_actor(request), "update_user", target["username"], {"roles": sorted(chosen), "enabled": is_enabled, "password_reset": bool(password), "retained_backup_limit": retained_backup_limit})
     return RedirectResponse("/admin/users?message=User+updated", status_code=303)
 
@@ -1809,38 +1825,12 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
     return RedirectResponse(f"/projects/{project_id}?message={message}", status_code=303)
 
 
-@app.post("/templates/{template_id}/access")
-async def grant_template_access(request: Request, template_id: str, username: str = Form(...)):
-    template = template_record(template_id)
-    if not template or (not has_admin_scope(request) and not admin_permission(request, "templates.approve") and template["owner"] != current_user(request)):
-        raise HTTPException(404, "Lab template not found.")
-    target = user_record(username.strip())
-    if not target or not target.get("enabled"):
-        return RedirectResponse(f"/projects/{template['source_project_id']}?error=Choose+an+enabled+portal+user", status_code=303)
-    with db.connect() as connection:
-        connection.execute("INSERT INTO lab_template_access(template_id,subject_type,subject_id,granted_by,granted_at) VALUES(?,?,?,?,?) ON CONFLICT(template_id,subject_type,subject_id) DO UPDATE SET granted_by=excluded.granted_by,granted_at=excluded.granted_at", (template_id, "local_user", target["username"], audit_actor(request), datetime.now(timezone.utc).isoformat()))
-    audit(audit_actor(request), "grant_lab_template", template["source_project_id"], {"template_id": template_id, "username": target["username"]})
-    return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+shared", status_code=303)
-
-
-@app.post("/templates/{template_id}/access/{username}/remove")
-async def revoke_template_access(request: Request, template_id: str, username: str):
-    template = template_record(template_id)
-    if not template or (not has_admin_scope(request) and not admin_permission(request, "templates.approve") and template["owner"] != current_user(request)):
-        raise HTTPException(404, "Lab template not found.")
-    with db.connect() as connection:
-        connection.execute("DELETE FROM lab_template_access WHERE template_id=? AND subject_type='local_user' AND subject_id=?", (template_id, username))
-    audit(audit_actor(request), "revoke_lab_template", template["source_project_id"], {"template_id": template_id, "username": username})
-    return RedirectResponse(f"/projects/{template['source_project_id']}?message=Template+access+updated", status_code=303)
-
-
 @app.post("/templates/{template_id}/unpublish")
 async def unpublish_template(request: Request, template_id: str):
     template = template_record(template_id)
     if not template or (not has_admin_scope(request) and not admin_permission(request, "templates.approve") and template["owner"] != current_user(request)):
         raise HTTPException(404, "Lab template not found.")
     with db.connect() as connection:
-        connection.execute("DELETE FROM lab_template_access WHERE template_id=?", (template_id,))
         connection.execute("DELETE FROM lab_templates WHERE template_id=?", (template_id,))
     archive_path = Path(str(template.get("archive_path") or ""))
     try:
@@ -1968,7 +1958,7 @@ async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
                 archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
             except (OSError, ValueError):
                 continue
-            available_templates.append({**template, "access_users": template_access_users(template["template_id"])})
+            available_templates.append(template)
         for template in pending_source:
             if template.get("approval_status") != "pending":
                 continue
@@ -2145,7 +2135,6 @@ async def project_page(request: Request, project_id: str):
         "can_share": can_manage_lab_sharing(request, project_id), "lab_owner": lab_owner(project_id), "portal_users": [account for account in list_users() if account.get("enabled")],
         "snapshot_shared_with": {str(item.get("snapshot_id")): backup_shared_users(project_id, str(item.get("snapshot_id"))) for item in snapshots},
         "snapshot_templates": {str(item["snapshot_id"]): item for item in templates_for_user(current_user(request), include_owned=has_admin_scope(request)) if item["source_project_id"] == project_id},
-        "template_access": {item["template_id"]: template_access_users(item["template_id"]) for item in templates_for_user(current_user(request), include_owned=has_admin_scope(request)) if item["source_project_id"] == project_id},
         "retained_remaining": max(0, retained_backup_limit(current_user(request)) - retained_backup_count(current_user(request))),
         "retained_limit": retained_backup_limit(current_user(request)),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
@@ -2398,12 +2387,16 @@ async def clone_snapshot_as_lab(request: Request, project_id: str, snapshot_id: 
     return start_snapshot_import(request, project_id, snapshot_id, name)
 
 
+def can_see_job(request: Request, job: dict[str, Any]) -> bool:
+    return has_admin_scope(request) or job.get("actor") == current_user(request)
+
+
 @app.get("/projects/{project_id}/import-jobs/{job_id}")
 async def import_job_status(request: Request, project_id: str, job_id: str):
     current_user(request)
     require_project_access(request, project_id)
     job = app.state.import_jobs.get(job_id)
-    if not job or job.get("source_project_id") != project_id:
+    if not job or job.get("source_project_id") != project_id or not can_see_job(request, job):
         raise HTTPException(404, "Import job not found. It may have been cleared after a portal restart.")
     return JSONResponse({key: job.get(key) for key in ("status", "progress_percent", "message", "project_id")})
 
@@ -2411,9 +2404,8 @@ async def import_job_status(request: Request, project_id: str, job_id: str):
 @app.get("/backup-import-jobs/{job_id}")
 async def dashboard_import_job_status(request: Request, job_id: str):
     """Return a dashboard import job without requiring a source-lab URL."""
-    current_user(request)
     job = app.state.import_jobs.get(job_id)
-    if not job:
+    if not job or not can_see_job(request, job):
         raise HTTPException(404, "Import job not found. It may have been cleared after a portal restart.")
     return JSONResponse({key: job.get(key) for key in ("status", "progress_percent", "message", "project_id")})
 

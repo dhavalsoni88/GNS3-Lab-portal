@@ -104,7 +104,7 @@ Move them to MariaDB before building the cluster phase.
 
 ## Releasing
 
-1. Move the **Unreleased** notes in `CHANGELOG.md` under a version heading,
+1. Move the **Unreleased** notes in `CHANGELOG.md` under a dated version heading,
    including any steps administrators must take.
 2. Update `version` in `pyproject.toml`.
 3. CI must be green. It installs the requirements, checks syntax and the
