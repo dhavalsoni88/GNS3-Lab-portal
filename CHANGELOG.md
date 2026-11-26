@@ -5,6 +5,14 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.0.1 — Unreleased
+
+- `scripts/upgrade.sh` installs requirements with `python -m pip`. A `.venv`
+  copied from another folder (common on v8.x servers installed from update
+  packages) has a `pip` that installs into the original folder, so the
+  database step failed with `No module named 'pymysql'`. It also rebuilds
+  `.venv` when its Python no longer runs, for example after an OS upgrade.
+
 ## v9.0.0 — 2026-11-26
 
 Upgrade any server with `git pull` followed by `sudo bash scripts/upgrade.sh`

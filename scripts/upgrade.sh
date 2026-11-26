@@ -76,8 +76,11 @@ fi
 step "Installing system packages and Python requirements"
 export DEBIAN_FRONTEND=noninteractive
 apt-get install -y -q pkg-config libxmlsec1-dev >/dev/null || { apt-get update -q && apt-get install -y -q pkg-config libxmlsec1-dev >/dev/null; }
-[[ -x "$PY" ]] || python3 -m venv "$PORTAL_DIR/.venv"
-"$PORTAL_DIR/.venv/bin/pip" install -q -r "$PORTAL_DIR/requirements.txt"
+# Rebuild the venv if its Python is gone (e.g. after an OS Python upgrade).
+"$PY" -c 'import sys' 2>/dev/null || python3 -m venv --clear "$PORTAL_DIR/.venv"
+# "python -m pip", not .venv/bin/pip: a venv copied from elsewhere has a pip that installs into the original.
+"$PY" -m pip install -q -r "$PORTAL_DIR/requirements.txt"
+"$PY" -c 'import pymysql, fastapi' || fail "the Python requirements did not install into $PORTAL_DIR/.venv."
 
 step "Preparing MariaDB (installs it if needed, applies migrations, refreshes grants)"
 bash "$PORTAL_DIR/scripts/setup-mariadb.sh" --portal-dir "$PORTAL_DIR" --service-user "$SERVICE_USER" --db-name "$DB_NAME" >/dev/null
