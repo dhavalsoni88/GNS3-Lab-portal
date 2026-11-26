@@ -119,7 +119,7 @@ systemctl daemon-reload
 step "Starting the portal"
 systemctl start "$SERVICE"
 for _ in $(seq 1 30); do
-  if curl -fsS -o /dev/null http://127.0.0.1:8088/login; then
+  if curl -fs -o /dev/null http://127.0.0.1:8088/login; then
     printf '\nUPGRADE COMPLETE (%s). The portal answers on 127.0.0.1:8088.\n' "$MODE"
     [[ "$MODE" == migrate ]] && echo "Everyone signs in again. $SQLITE is kept unchanged as an archive."
     [[ -n "${KEY_ROTATED:-}" ]] && echo "A new PORTAL_SECRET_KEY was written to .env. If you use Active Directory, re-enter its service-account password under Administration > Identity."
