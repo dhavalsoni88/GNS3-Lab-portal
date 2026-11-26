@@ -109,7 +109,8 @@ PORTAL_DB_NAME=$DB_NAME
 PORTAL_DB_USER=gns3_portal_app
 PORTAL_DB_PASSWORD_FILE=$SECRET_DIR/db-app-password
 
-To move existing v8.x SQLite data, stop the portal and run:
+To move an existing SQLite database (v8.x, or v9 previews), follow
+docs/upgrading.md. In short: stop the portal, then run:
 
   sudo systemctl stop gns3-lab-portal
   sudo env PORTAL_DB_HOST=localhost PORTAL_DB_NAME=$DB_NAME \\

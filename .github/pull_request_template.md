@@ -4,13 +4,12 @@
 
 ## How it was tested
 
-- [ ] `python -m pytest` (SQLite)
-- [ ] `PORTAL_TEST_MARIADB=1 … python -m pytest` (MariaDB)
+- [ ] `PORTAL_DB_HOST=localhost PORTAL_DB_USER=root python -m pytest` (MariaDB)
 - [ ] Checked in a browser, including phone width, if the interface changed
 
 ## Checklist
 
 - [ ] New or changed routes check permissions and write an audit entry
-- [ ] Schema changes add a new `database/mariadb/NNN_*.sql` and update the SQLite schema
+- [ ] Schema changes add a new `database/mariadb/NNN_*.sql` (and a change-log trigger if the table holds access data)
 - [ ] Docs in `docs/` and the **Unreleased** section of `CHANGELOG.md` are updated
 - [ ] No secrets, internal addresses or credentials in code, docs or tests

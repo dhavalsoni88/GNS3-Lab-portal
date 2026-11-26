@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy a v8.x SQLite portal database into MariaDB.
+"""Copy a v8.x or v9-preview SQLite portal database into MariaDB.
 
 Stop the portal first. The script:
 
@@ -33,13 +33,17 @@ import portal_db  # noqa: E402
 # log readable. portal_sessions is intentionally excluded.
 TABLES = (
     "portal_users", "lab_owners", "lab_shares", "backup_shares",
-    "retained_backups", "lab_templates", "lab_template_access", "audit_log",
+    "retained_backups", "lab_templates", "lab_template_access",
+    # v9-preview SQLite installs also hold roles and sign-in providers.
+    "user_roles", "identity_providers", "group_role_mappings", "audit_log",
 )
 KEYS = {
     "portal_users": ("username",), "lab_owners": ("project_id",),
     "lab_shares": ("project_id", "username"), "backup_shares": ("project_id", "snapshot_id", "username"),
     "retained_backups": ("backup_id",), "lab_templates": ("template_id",),
     "lab_template_access": ("template_id", "subject_type", "subject_id"),
+    "user_roles": ("username", "role_key", "source"), "identity_providers": ("provider_id",),
+    "group_role_mappings": ("provider_id", "group_id", "role_key"),
 }
 
 
@@ -54,7 +58,7 @@ def mariadb_columns(cursor, table: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--sqlite", default=str(portal_db.SQLITE_PATH), help="path to the v8.x audit.db (default: %(default)s)")
+    parser.add_argument("--sqlite", default=str(portal_db.LEGACY_SQLITE_PATH), help="path to the v8.x audit.db (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true", help="report what would be copied without writing to MariaDB")
     args = parser.parse_args()
 
@@ -112,7 +116,7 @@ def main() -> int:
             print(f"Verification failed: {failures} rows are missing in MariaDB.", file=sys.stderr)
             return 1
         else:
-            print("Migration verified. Set PORTAL_DB_BACKEND=mariadb in .env and restart the portal.")
+            print("Migration verified. Set the PORTAL_DB_* lines in .env (PORTAL_DB_BACKEND=mariadb) and start the portal.")
         return 0
     finally:
         target.close()

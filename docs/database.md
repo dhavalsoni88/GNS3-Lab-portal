@@ -1,25 +1,23 @@
 # Database
 
 The portal stores accounts, roles, sessions, lab ownership, sharing,
-templates, identity providers and the audit log in a database:
+templates, identity providers and the audit log in **MariaDB 10.6 or newer**.
+It is the only supported database since v9.0. Earlier SQLite installs move
+across with a verified, re-runnable script: see
+[Moving from SQLite to MariaDB](upgrading.md#moving-from-sqlite-to-mariadb).
 
-- **SQLite** is the default. It needs no setup and suits a single server.
-- **MariaDB 10.6 or newer** is required for multi-server clusters and adds
-  tamper-resistant auditing.
-
-Choose one with `PORTAL_DB_BACKEND`. The application code is the same for
-both: [`portal_db.py`](../portal_db.py) translates its SQL for MariaDB.
+[`portal_db.py`](../portal_db.py) opens one short connection per unit of
+work, commits on success and rolls back on any error.
 
 ## Schema and migrations
 
 | Migration | Contents |
 |---|---|
-| [`001_core.sql`](../database/mariadb/001_core.sql) | Core tables, one-to-one with the SQLite schema. |
+| [`001_core.sql`](../database/mariadb/001_core.sql) | Core tables: users, sessions, owners, shares, retained backups, templates, audit log. |
 | [`002_audit.sql`](../database/mariadb/002_audit.sql) | Audit request context, append-only triggers and the change history. |
 | [`003_identity.sql`](../database/mariadb/003_identity.sql) | Sign-in sources, roles, identity providers and group mappings. |
 
-On SQLite, the schema is created and upgraded automatically at start-up. On
-MariaDB, migrations are applied once each, in order, and recorded in
+Migrations are applied once each, in order, and recorded in
 `schema_migrations`:
 
 ```bash
@@ -29,7 +27,7 @@ python3 portal_db.py migrate   # apply them (uses the migration account)
 
 The portal refuses to start while MariaDB migrations are pending.
 
-## Audit on MariaDB
+## Audit
 
 - **Portal events** (`audit_log`) record user, action, target, source IP,
   browser, request ID, result and the connected MariaDB account.
@@ -62,34 +60,13 @@ with mode 0640:
 For phpMyAdmin or other tools, give each administrator their own MariaDB
 account. Never use `root` through a web interface.
 
-## Moving from SQLite to MariaDB
+## Backing up the database
 
-1. Install the requirements, then prepare MariaDB. The script installs
-   `mariadb-server` if needed, enables the audit plugin, creates the
-   database and accounts, applies migrations and sets grants. It is safe to
-   re-run.
+Back up MariaDB with the rest of the server, at least daily:
 
-   ```bash
-   sudo /opt/gns3-lab-portal/.venv/bin/pip install -r /opt/gns3-lab-portal/requirements.txt
-   sudo bash /opt/gns3-lab-portal/scripts/setup-mariadb.sh
-   ```
+```bash
+sudo mariadb-dump --single-transaction --routines --triggers gns3_lab_portal | gzip > /backup/gns3_lab_portal-$(date +%F).sql.gz
+```
 
-2. Stop the portal, then copy the data. The script backs up `audit.db`
-   first, copies every table except sessions, verifies every row arrived,
-   and can be re-run safely.
-
-   ```bash
-   sudo systemctl stop gns3-lab-portal
-   sudo env PORTAL_DB_HOST=localhost \
-     PORTAL_DB_MIGRATE_USER=gns3_portal_migrate \
-     PORTAL_DB_MIGRATE_PASSWORD_FILE=/etc/gns3-lab-portal/db-migrate-password \
-     /opt/gns3-lab-portal/.venv/bin/python /opt/gns3-lab-portal/scripts/migrate-sqlite-to-mariadb.py \
-     --sqlite /opt/gns3-lab-portal/data/audit.db
-   ```
-
-3. Add the `PORTAL_DB_*` lines that `setup-mariadb.sh` printed to `.env`,
-   then start the portal. Everyone signs in again, because sessions are not
-   copied.
-
-To go back, set `PORTAL_DB_BACKEND=sqlite`. The migration never modifies the
-original `audit.db`.
+`--triggers` matters: the append-only and change-history triggers are part
+of the audit design. Test a restore on a spare server now and then.

@@ -21,9 +21,9 @@ loads them from `/opt/gns3-lab-portal/.env`; start from
 
 | Setting | Default | Description |
 |---|---|---|
-| `PORTAL_AUTH_ENABLED` | `false` | Turn on accounts and roles. **Keep `true` in any shared deployment**: with `false`, anyone who reaches the portal has full control. |
+| `PORTAL_AUTH_ENABLED` | `true` | Accounts and roles. **Never set `false` outside an isolated test bench**: with `false`, anyone who reaches the portal has full control. |
 | `PORTAL_USERNAME`, `PORTAL_PASSWORD` | `portaladmin` / placeholder | First local Platform Admin, created only when the database is new. |
-| `PORTAL_SECRET_KEY` | placeholder | Signs session cookies and encrypts stored directory passwords. Use 32+ random characters (`openssl rand -hex 32`) and keep it stable. |
+| `PORTAL_SECRET_KEY` | placeholder | Signs session cookies and encrypts stored directory passwords. The portal **refuses to start** unless it is 32+ characters and not a shipped placeholder. Generate one with `openssl rand -hex 32` and keep it stable. |
 | `PORTAL_PUBLIC_URL` | empty | Public `https://` address of the portal. Required for SAML single sign-on. |
 | `PORTAL_COOKIE_SECURE` | `false` | Send the session cookie only over HTTPS. Set `true` once behind TLS. |
 | `PORTAL_SESSION_IDLE_SECONDS` | `1800` | Sign out after this long without activity. |
@@ -38,8 +38,8 @@ Active Directory and SAML providers are configured in the portal, under
 
 | Setting | Default | Description |
 |---|---|---|
-| `PORTAL_DB_BACKEND` | `sqlite` | `sqlite` or `mariadb`. |
-| `AUDIT_DB` | `./data/audit.db` | SQLite database file. |
+| `PORTAL_DB_BACKEND` | `mariadb` | Only `mariadb` is accepted. Any other value stops start-up with a pointer to the SQLite migration. |
+| `AUDIT_DB` | `./data/audit.db` | Location of a pre-v9.0 SQLite database. Read only by the migration script and by a start-up check: while this file exists and MariaDB has no users, the portal refuses to start. |
 | `PORTAL_DB_HOST` | `127.0.0.1` | MariaDB host. `localhost` uses the local Unix socket. |
 | `PORTAL_DB_PORT` | `3306` | MariaDB TCP port. |
 | `PORTAL_DB_SOCKET` | `/run/mysqld/mysqld.sock` | Socket used when the host is `localhost`. |
@@ -57,7 +57,8 @@ Active Directory and SAML providers are configured in the portal, under
 |---|---|---|
 | `RETAINED_BACKUP_DIR` | `/mnt/HDD_STORE/my-lab-retained-backups` | Archive for backups kept when a lab is deleted. |
 | `LAB_TEMPLATE_DIR` | `/mnt/HDD_STORE/my-lab-templates` | Independent copies of published templates. |
-| `PORTAL_UPLOAD_DIR` | `./data/uploads` | Temporary space for uploaded backup files. |
+| `PORTAL_UPLOAD_DIR` | `./data/uploads` | Temporary space for uploaded backup files. The systemd unit also points `TMPDIR` here, so uploads never fill the root disk. |
+| `PORTAL_MAX_UPLOAD_BYTES` | `53687091200` (50 GiB) | Largest backup file users may upload. Keep Nginx `client_max_body_size` in step. |
 | `PORTAL_AVATAR_DIR` | `./data/avatars` | Private profile photos. |
 
 ## Backups, logs and monitoring

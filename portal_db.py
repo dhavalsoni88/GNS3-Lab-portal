@@ -1,27 +1,26 @@
-"""Database access for the GNS3 Lab Portal.
+"""Database access for the GNS3 Lab Portal (MariaDB only).
 
-The portal runs on SQLite (single small server, the v8.x default) or MariaDB
-(v9.x, required for multi-server clusters). Application code writes one SQL
-dialect: SQLite-style ``?`` placeholders and ``ON CONFLICT ... DO UPDATE``
-upserts. This module translates those statements for MariaDB so every query
-in ``app.py`` runs unchanged on either backend.
+SQLite support ended in v9.0; scripts/migrate-sqlite-to-mariadb.py moves an
+existing SQLite database across (see docs/upgrading.md). Application queries
+still use ``?`` placeholders and ``ON CONFLICT ... DO UPDATE`` upserts, which
+this module translates to MariaDB SQL.
 """
 from __future__ import annotations
 
 import contextvars
 import os
 import re
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 BASE_DIR = Path(__file__).resolve().parent
-BACKEND = os.getenv("PORTAL_DB_BACKEND", "sqlite").strip().lower()
-if BACKEND not in {"sqlite", "mariadb"}:
-    raise RuntimeError("PORTAL_DB_BACKEND must be 'sqlite' or 'mariadb'.")
-
-SQLITE_PATH = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
+# An existing v8.x/v9-preview .env may still say sqlite: stop rather than start empty.
+if os.getenv("PORTAL_DB_BACKEND", "mariadb").strip().lower() != "mariadb":
+    raise RuntimeError("SQLite is no longer supported. Move the data with scripts/migrate-sqlite-to-mariadb.py "
+                       "(see docs/upgrading.md), then set PORTAL_DB_BACKEND=mariadb or remove the line.")
+# Where a pre-v9.0 SQLite database lives; the portal will not start on an empty MariaDB while it exists.
+LEGACY_SQLITE_PATH = Path(os.getenv("AUDIT_DB", str(BASE_DIR / "data" / "audit.db")))
 MARIADB_HOST = os.getenv("PORTAL_DB_HOST", "127.0.0.1")
 MARIADB_PORT = int(os.getenv("PORTAL_DB_PORT", "3306"))
 MARIADB_NAME = os.getenv("PORTAL_DB_NAME", "gns3_lab_portal")
@@ -52,13 +51,8 @@ def _mariadb_password() -> str:
 
 
 def _integrity_errors() -> tuple[type[BaseException], ...]:
-    errors: list[type[BaseException]] = [sqlite3.IntegrityError]
-    try:
-        import pymysql
-        errors.append(pymysql.err.IntegrityError)
-    except ImportError:
-        pass
-    return tuple(errors)
+    import pymysql
+    return (pymysql.err.IntegrityError,)
 
 
 IntegrityError = _integrity_errors()
@@ -118,30 +112,17 @@ class _Cursor:
 
 
 class Connection:
-    """A small DB-API wrapper with sqlite3's ``connection.execute`` shape."""
+    """A small DB-API wrapper with a ``connection.execute(sql, params)`` shape."""
 
-    def __init__(self, raw: Any, backend: str):
+    def __init__(self, raw: Any):
         self.raw = raw
-        self.backend = backend
-        # Retained so existing ``connection.row_factory = sqlite3.Row`` lines
-        # stay harmless; rows are always returned as ``Row``.
-        self.row_factory = None
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> _Cursor:
-        if self.backend == "sqlite":
-            cursor = self.raw.execute(sql, tuple(params))
-        else:
-            cursor = self.raw.cursor()
-            cursor.execute(translate_for_mariadb(sql), tuple(params))
+        cursor = self.raw.cursor()
+        cursor.execute(translate_for_mariadb(sql), tuple(params))
         columns = [item[0] for item in cursor.description] if cursor.description else None
         return _Cursor(cursor, columns)
 
-    def executescript(self, script: str) -> None:
-        if self.backend == "sqlite":
-            self.raw.executescript(script)
-            return
-        for statement in split_sql(script):
-            self.raw.cursor().execute(statement)
 
 
 def split_sql(script: str) -> list[str]:
@@ -181,19 +162,14 @@ def _connect_mariadb(database: str | None = MARIADB_NAME, user: str | None = Non
 @contextmanager
 def connect() -> Iterator[Connection]:
     """Open a connection, commit on success, roll back on error, then close."""
-    if BACKEND == "sqlite":
-        SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        raw = sqlite3.connect(SQLITE_PATH)
-    else:
-        raw = _connect_mariadb()
-    connection = Connection(raw, BACKEND)
+    raw = _connect_mariadb()
+    connection = Connection(raw)
     try:
-        if BACKEND == "mariadb":
-            context = current_context()
-            # Read by the change-log triggers in 002_audit.sql.
-            connection.execute("SET @portal_actor=?, @portal_source_ip=?, @portal_request_id=?", (
-                context.get("actor", "")[:255], context.get("source_ip", "")[:45], context.get("request_id", "")[:64],
-            ))
+        context = current_context()
+        # Read by the change-log triggers in 002_audit.sql.
+        connection.execute("SET @portal_actor=?, @portal_source_ip=?, @portal_request_id=?", (
+            context.get("actor", "")[:255], context.get("source_ip", "")[:45], context.get("request_id", "")[:64],
+        ))
         yield connection
         raw.commit()
     except BaseException:
@@ -256,8 +232,6 @@ if __name__ == "__main__":
     import sys
 
     command = sys.argv[1] if len(sys.argv) > 1 else "status"
-    if BACKEND != "mariadb":
-        sys.exit("PORTAL_DB_BACKEND is not 'mariadb'; SQLite schema upgrades run automatically at startup.")
     if command == "migrate":
         migration_connection = _migration_connection()
         try:

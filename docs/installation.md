@@ -43,6 +43,20 @@ sudo chmod 640 /opt/gns3-lab-portal/.env
 sudo chgrp www-data /opt/gns3-lab-portal/.env
 ```
 
+## 2a. Prepare MariaDB
+
+The portal stores everything in MariaDB 10.6 or newer. This script installs
+`mariadb-server` if needed, creates the database and three least-privilege
+accounts, turns on the server audit log and applies the schema. It prints the
+`PORTAL_DB_*` lines for `.env`, and is safe to re-run.
+
+```bash
+sudo bash /opt/gns3-lab-portal/scripts/setup-mariadb.sh
+```
+
+Upgrading a server that already runs the portal on SQLite? Stop here and
+follow [Moving from SQLite to MariaDB](upgrading.md#moving-from-sqlite-to-mariadb) instead.
+
 ## 3. Configure `.env`
 
 Edit `/opt/gns3-lab-portal/.env`. A typical same-host configuration:
@@ -58,6 +72,12 @@ PORTAL_USERNAME=portaladmin
 PORTAL_PASSWORD=a-strong-initial-admin-password
 PORTAL_SECRET_KEY=paste-the-output-of-openssl-rand-hex-32
 
+PORTAL_DB_BACKEND=mariadb
+PORTAL_DB_HOST=localhost
+PORTAL_DB_NAME=gns3_lab_portal
+PORTAL_DB_USER=gns3_portal_app
+PORTAL_DB_PASSWORD_FILE=/etc/gns3-lab-portal/db-app-password
+
 GNS3_PROJECTS_DIR=/home/gns3/GNS3/projects
 GNS3_SNAPSHOTS_DIR=/HDD_STORE/gns3-snapshots
 RETAINED_BACKUP_DIR=/HDD_STORE/my-lab-retained-backups
@@ -66,7 +86,8 @@ PORTAL_LOG_DIR=/var/log/gns3-lab-portal
 ```
 
 Generate the secret key with `openssl rand -hex 32`. It signs sessions and
-encrypts stored directory passwords, so keep it stable.
+encrypts stored directory passwords, so keep it stable. The portal will not
+start with a placeholder or a key shorter than 32 characters.
 
 `PORTAL_USERNAME` and `PORTAL_PASSWORD` create the first Platform Admin only
 when the portal database is first created. Change that password in the
@@ -140,6 +161,5 @@ Sign in with the initial administrator, change its password under
 
 ## Next steps
 
-- Move the database to MariaDB for clusters and tamper-resistant auditing:
-  [database.md](database.md).
+- Read the [administrator guide](admin-guide.md) for day-to-day tasks.
 - Connect Active Directory or SSO: [authentication.md](authentication.md).

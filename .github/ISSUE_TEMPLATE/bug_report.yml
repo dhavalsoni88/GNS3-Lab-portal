@@ -29,7 +29,7 @@ body:
     id: database
     attributes:
       label: Database
-      options: [SQLite, MariaDB]
+      options: [MariaDB, SQLite (v8.x only)]
   - type: input
     id: gns3
     attributes:

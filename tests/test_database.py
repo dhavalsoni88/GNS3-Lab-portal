@@ -10,9 +10,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app as portal
+import portal_auth as auth
 import portal_db as db
-
-MARIADB = db.BACKEND == "mariadb"
 
 
 @pytest.fixture(scope="module")
@@ -93,7 +92,6 @@ def test_upsert_lab_owner():
     assert portal.owned_project_ids("LEGACY") == {"project-1"}
 
 
-@pytest.mark.skipif(not MARIADB, reason="MariaDB audit triggers")
 def test_audit_tables_are_append_only():
     import pymysql
     for statement in ("UPDATE audit_log SET actor='x'", "DELETE FROM audit_log", "DELETE FROM db_change_log"):
@@ -102,7 +100,6 @@ def test_audit_tables_are_append_only():
                 connection.execute(statement)
 
 
-@pytest.mark.skipif(not MARIADB, reason="MariaDB change-log triggers")
 def test_change_log_records_actor_and_never_password_hash(client):
     login(client, "portaladmin", "initial-admin-password")
     client.post("/admin/users/Alice/update", data={"roles": ["lab_editor"], "enabled": "1", "password": "alice-new-password", "retained_backup_limit": "3"})
@@ -118,7 +115,6 @@ def test_change_log_records_actor_and_never_password_hash(client):
     assert "password_hash" not in update["old_values"] + update["new_values"]
 
 
-@pytest.mark.skipif(not MARIADB, reason="SQLite to MariaDB migration")
 def test_sqlite_to_mariadb_migration(tmp_path):
     source = tmp_path / "v8.db"
     with sqlite3.connect(source) as connection:
@@ -126,6 +122,9 @@ def test_sqlite_to_mariadb_migration(tmp_path):
         connection.execute("INSERT INTO portal_users VALUES ('v8user', 'scrypt$a$b', 'user', 1, '2025-01-01T00:00:00+00:00', 'v8@example.com', NULL, NULL, NULL, 4)")
         connection.execute("CREATE TABLE lab_owners (project_id TEXT PRIMARY KEY, username TEXT NOT NULL, assigned_at TEXT NOT NULL)")
         connection.execute("INSERT INTO lab_owners VALUES ('p-v8', 'v8user', '2025-01-01T00:00:00+00:00')")
+        # v9-preview SQLite installs also hold roles.
+        connection.execute("CREATE TABLE user_roles (username TEXT, role_key TEXT, source TEXT, assigned_at TEXT, PRIMARY KEY(username, role_key, source))")
+        connection.execute("INSERT INTO user_roles VALUES ('v8user', 'lab_manager', 'direct', '2025-01-01T00:00:00+00:00')")
         connection.execute("CREATE TABLE audit_log (id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, details TEXT)")
         connection.execute("INSERT INTO audit_log VALUES (900001, '2025-01-01T00:00:00+00:00', 'v8user', 'create_project', 'p-v8', '{}')")
     script = [sys.executable, "scripts/migrate-sqlite-to-mariadb.py", "--sqlite", str(source)]
@@ -136,6 +135,7 @@ def test_sqlite_to_mariadb_migration(tmp_path):
     assert second.returncode == 0 and "copied=     0" in second.stdout
     assert portal.user_record("v8user")["retained_backup_limit"] == 4
     assert portal.lab_owner("p-v8") == "v8user"
+    assert "lab_manager" in auth.user_roles("v8user")
     with db.connect() as connection:
         assert connection.execute("SELECT actor FROM audit_log WHERE id=900001").fetchone()[0] == "v8user"
         assert connection.execute("SELECT portal_actor FROM db_change_log WHERE table_name='lab_owners' AND row_key='p-v8'").fetchone()[0] == "sqlite-migration"

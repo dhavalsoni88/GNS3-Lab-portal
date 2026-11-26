@@ -1,10 +1,10 @@
-"""Test configuration. The backend is chosen before the portal is imported.
+"""Test configuration, set before the portal is imported.
 
-SQLite runs by default. To run the same tests on MariaDB:
+The tests need a MariaDB server and an account that may create databases:
 
-    PORTAL_TEST_MARIADB=1 PORTAL_DB_HOST=localhost PORTAL_DB_USER=root python -m pytest
+    PORTAL_DB_HOST=localhost PORTAL_DB_USER=root python -m pytest
 
-The MariaDB run drops and recreates the ``gns3_portal_test`` database.
+Each run drops and recreates the ``gns3_portal_test`` database.
 """
 import os
 import sys
@@ -19,9 +19,9 @@ os.environ.update({
     "PORTAL_AUTH_ENABLED": "true",
     "PORTAL_USERNAME": "portaladmin",
     "PORTAL_PASSWORD": "initial-admin-password",
-    "PORTAL_SECRET_KEY": "test-secret",
+    "PORTAL_SECRET_KEY": "test-secret-key-that-is-at-least-32-characters",
     "GNS3_URL": "http://127.0.0.1:9",
-    "AUDIT_DB": str(TMP / "audit.db"),
+    "AUDIT_DB": str(TMP / "no-legacy-sqlite.db"),
     "PORTAL_UPLOAD_DIR": str(TMP / "uploads"),
     "PORTAL_AVATAR_DIR": str(TMP / "avatars"),
     "RETAINED_BACKUP_DIR": str(TMP / "retained"),
@@ -29,12 +29,11 @@ os.environ.update({
     "PORTAL_LOG_DIR": str(TMP / "logs"),
     "PORTAL_PUBLIC_URL": "https://portal.test.example",
 })
-if os.getenv("PORTAL_TEST_MARIADB"):
-    os.environ.update({"PORTAL_DB_BACKEND": "mariadb", "PORTAL_DB_NAME": "gns3_portal_test", "PORTAL_DB_AUTO_MIGRATE": "true"})
-    import portal_db
+os.environ.update({"PORTAL_DB_BACKEND": "mariadb", "PORTAL_DB_NAME": "gns3_portal_test", "PORTAL_DB_AUTO_MIGRATE": "true"})
+import portal_db  # noqa: E402
 
-    raw = portal_db._connect_mariadb(database=None)
-    with raw.cursor() as cursor:
-        cursor.execute("DROP DATABASE IF EXISTS gns3_portal_test")
-        cursor.execute("CREATE DATABASE gns3_portal_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-    raw.close()
+raw = portal_db._connect_mariadb(database=None)
+with raw.cursor() as cursor:
+    cursor.execute("DROP DATABASE IF EXISTS gns3_portal_test")
+    cursor.execute("CREATE DATABASE gns3_portal_test CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+raw.close()
