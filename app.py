@@ -648,7 +648,9 @@ async def gns3(method: str, path: str, **kwargs: Any) -> Any:
         except ValueError:
             detail = response.text
         api_logger.warning("request method=%s path=%s status=%s duration_ms=%d detail=%s", method, path, response.status_code, duration_ms, safe_api_detail(detail))
-        raise HTTPException(response.status_code, f"GNS3 refused the request (HTTP {response.status_code}). An administrator can find details in gns3-api.log.")
+        # GNS3's own "message" is written for its users (e.g. "The image x.qcow2 is missing"); the raw body stays in the log.
+        message = str(detail.get("message") or "")[:200] if isinstance(detail, dict) else ""
+        raise HTTPException(response.status_code, f"GNS3 refused the request: {message}" if message else f"GNS3 refused the request (HTTP {response.status_code}). An administrator can find details in gns3-api.log.")
     api_logger.info("request method=%s path=%s status=%s duration_ms=%d", method, path, response.status_code, duration_ms)
     return response.json() if response.content else None
 
@@ -759,7 +761,11 @@ async def set_lab_node_power(project_id: str, action: str) -> tuple[int, int]:
     """Start or stop emulated nodes, leaving built-in active nodes untouched."""
     if action not in {"start", "stop"}:
         raise ValueError("Unsupported lab power action")
-    await ensure_project_open(project_id)
+    if action == "start":
+        await ensure_project_open(project_id)
+    elif str((await gns3("GET", f"/v2/projects/{project_id}")).get("status", "")).lower() != "opened":
+        # A closed project runs nothing; opening it just to stop it fails when an image is missing.
+        return 0, 0
     nodes = await gns3("GET", f"/v2/projects/{project_id}/nodes")
     ignored = [node for node in nodes if is_non_stoppable_node(node)]
     targets = [

@@ -214,3 +214,28 @@ def test_saml_sign_in_starts_are_capped():
         store.put(f"relay-{n}", "idp", f"id-{n}")
     with pytest.raises(auth.IdentityError):
         store.put("relay-3", "idp", "id-3")
+
+
+def test_stopping_a_closed_lab_never_opens_it(client):
+    calls = []
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/open"):
+            return httpx.Response(409, json={"message": "The image winserver2019.qcow2 is missing", "status": 409})
+        if request.url.path.endswith("/nodes"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json={"project_id": "lab-owned", "name": "Owner Lab", "status": "closed"})
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    try:
+        login(client, "owner1", "owner1-password-1")
+        stop = client.post("/projects/lab-owned/stop", data={"return_to": "/projects/lab-owned"}, follow_redirects=False)
+        assert "message=" in stop.headers["location"] and not any(path.endswith("/open") for _, path in calls)
+        # Starting still has to open it, and shows GNS3's own reason when that fails.
+        start = client.post("/projects/lab-owned/start", data={"return_to": "/projects/lab-owned"}, follow_redirects=False)
+        assert "winserver2019.qcow2+is+missing" in start.headers["location"]
+        client.post("/logout")
+    finally:
+        portal.app.state.gns3_client = original
