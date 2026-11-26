@@ -438,6 +438,7 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.gns3_client = httpx.AsyncClient(timeout=timeout, auth=gns3_auth, limits=limits)
     app_instance.state.backup_jobs = {}
     app_instance.state.import_jobs = {}
+    app_instance.state.template_jobs = {}
     app_instance.state.monitor_disk_samples = {}
     app_instance.state.saml_requests = auth.SamlRequestStore()
     app_instance.state.login_failures = {}
@@ -1930,6 +1931,7 @@ async def remove_backup_share(request: Request, project_id: str, snapshot_id: st
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/template")
 async def create_lab_template(request: Request, project_id: str, snapshot_id: str, name: str = Form(...), description: str = Form("")):
+    """Start copying a backup into the template archive; the page shows progress while it runs."""
     require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
@@ -1941,31 +1943,72 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
     snapshot = next((item for item in snapshots if str(item.get("snapshot_id")) == snapshot_id), None)
     if not snapshot:
         raise HTTPException(404, "Backup not found.")
-    template_id = str(uuid.uuid4())
+    with db.connect() as connection:
+        exists = connection.execute("SELECT 1 FROM lab_templates WHERE source_project_id=? AND snapshot_id=?", (project_id, snapshot_id)).fetchone()
+    if exists or any(job.get("snapshot_id") == snapshot_id and job.get("status") == "copying" for job in app.state.template_jobs.values()):
+        return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template#backups", status_code=303)
     source = local_snapshot_file(await gns3("GET", f"/v2/projects/{project_id}"), snapshot)
     if not source:
         return RedirectResponse(f"/projects/{project_id}?error=This+backup+cannot+be+read+locally.+Configure+snapshot+storage+access+first", status_code=303)
+    prune_jobs(app.state.template_jobs)
+    job_id = str(uuid.uuid4())
+    approved = admin_permission(request, "templates.approve")
+    app.state.template_jobs[job_id] = job = {
+        "project_id": project_id, "snapshot_id": snapshot_id, "name": name, "description": description,
+        "actor": current_user(request), "audit_actor": audit_actor(request), "approved": approved,
+        "status": "copying", "progress_percent": 0, "message": "Copying the backup into the template archive…",
+    }
+    asyncio.create_task(run_template_job(job, source))
+    return RedirectResponse(f"/projects/{project_id}?template_job={job_id}#backups", status_code=303)
+
+
+def copy_with_progress(source: Path, destination: Path, job: dict[str, Any]) -> None:
+    total = max(source.stat().st_size, 1)
+    copied = 0
+    with source.open("rb") as reader, destination.open("wb") as writer:
+        while chunk := reader.read(8 * 1024 * 1024):
+            writer.write(chunk)
+            copied += len(chunk)
+            job.update(progress_percent=min(99, int(100 * copied / total)),
+                       message=f"Copying the backup into the template archive ({format_storage_size(copied)} of {format_storage_size(total)})…")
+    shutil.copystat(source, destination)
+
+
+async def run_template_job(job: dict[str, Any], source: Path) -> None:
+    """Copy, verify and record a template outside the web request, so proxies never time out."""
+    template_id = str(uuid.uuid4())
     template_dir = LAB_TEMPLATE_DIR / template_id
     destination = template_dir / "template.gns3snapshot"
     try:
         template_dir.mkdir(parents=True, exist_ok=False)
-        await asyncio.to_thread(shutil.copy2, source, destination)
+        await asyncio.to_thread(copy_with_progress, source, destination, job)
         if destination.stat().st_size != source.stat().st_size:
             raise OSError("Template archive size verification failed")
+        status_value = "approved" if job["approved"] else "pending"
+        now = datetime.now(timezone.utc).isoformat()
         with db.connect() as connection:
-            status_value = "approved" if admin_permission(request, "templates.approve") else "pending"
-            approved_by = audit_actor(request) if status_value == "approved" else None
-            approved_at = datetime.now(timezone.utc).isoformat() if status_value == "approved" else None
-            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at,approval_status,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, current_user(request), project_id, snapshot_id, name, description or None, str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat(), status_value, approved_by, approved_at))
+            connection.execute("INSERT INTO lab_templates(template_id,owner,source_project_id,snapshot_id,name,description,archive_path,size_bytes,created_at,approval_status,approved_by,approved_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (template_id, job["actor"], job["project_id"], job["snapshot_id"], job["name"], job["description"] or None, str(destination), destination.stat().st_size, now, status_value, job["audit_actor"] if job["approved"] else None, now if job["approved"] else None))
     except db.IntegrityError:
         shutil.rmtree(template_dir, ignore_errors=True)
-        return RedirectResponse(f"/projects/{project_id}?error=This+backup+is+already+a+template", status_code=303)
+        job.update(status="failed", message="This backup is already a template.")
+        return
     except OSError:
+        portal_logger.exception("template_copy_failed project_id=%s snapshot_id=%s", job["project_id"], job["snapshot_id"])
         shutil.rmtree(template_dir, ignore_errors=True)
-        return RedirectResponse(f"/projects/{project_id}?error=The+template+archive+could+not+be+created", status_code=303)
-    audit(audit_actor(request), "create_lab_template", project_id, {"template_id": template_id, "snapshot_id": snapshot_id, "name": name, "approval_status": status_value})
-    message = "Lab+template+created" if status_value == "approved" else "Template+submitted+for+Administrator+approval"
-    return RedirectResponse(f"/projects/{project_id}?message={message}", status_code=303)
+        job.update(status="failed", message="The template archive could not be created. Check free space on the template disk.")
+        return
+    audit(job["audit_actor"], "create_lab_template", job["project_id"], {"template_id": template_id, "snapshot_id": job["snapshot_id"], "name": job["name"], "approval_status": status_value})
+    job.update(status="completed", progress_percent=100, template_id=template_id,
+               message="Template published. It is available to everyone under New lab." if job["approved"] else "Template submitted for approval.")
+
+
+@app.get("/projects/{project_id}/template-jobs/{job_id}")
+async def template_job_status(request: Request, project_id: str, job_id: str):
+    require_project_access(request, project_id)
+    job = app.state.template_jobs.get(job_id)
+    if not job or job.get("project_id") != project_id or not can_see_job(request, job):
+        raise HTTPException(404, "Template job not found. It may have been cleared after a portal restart.")
+    return JSONResponse({key: job.get(key) for key in ("status", "progress_percent", "message")})
 
 
 @app.post("/templates/{template_id}/unpublish")
@@ -2286,6 +2329,7 @@ async def project_page(request: Request, project_id: str):
         "retained_limit": retained_backup_limit(current_user(request)),
         "impersonating": request.session.get("impersonating", "") if AUTH_ENABLED else "",
         "backup_job_id": backup_job_id,
+        "template_job_id": request.query_params.get("template_job", "") if request.query_params.get("template_job", "") in app.state.template_jobs else "",
         "import_job_id": request.query_params.get("import_job", ""),
     })
 
@@ -2379,7 +2423,7 @@ ACTIVE_IMPORT_STATES = frozenset({"preparing", "importing"})
 
 def prune_jobs(jobs: dict[str, dict[str, Any]], keep: int = 100) -> None:
     """Drop all but the newest finished jobs; running jobs are never dropped."""
-    finished = [key for key, job in jobs.items() if job.get("status") not in ACTIVE_BACKUP_STATES | ACTIVE_IMPORT_STATES]
+    finished = [key for key, job in jobs.items() if job.get("status") in {"completed", "failed", "cancelled"}]
     for key in finished[:-keep]:
         del jobs[key]
 

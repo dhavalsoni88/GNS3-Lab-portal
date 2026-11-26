@@ -2,6 +2,7 @@
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import httpx
 import pytest
@@ -337,6 +338,52 @@ def test_publishing_an_appliance_adds_images_and_template_without_replacing_anyt
         # The same image already on GNS3 is reused, not uploaded again.
         state["images"] = [{"filename": "winserver2019.qcow2", "md5sum": hashlib.md5(image).hexdigest()}]
         assert "message=Published" in publish(image_bytes=None) and len(state["uploads"]) == 1
+        client.post("/logout")
+    finally:
+        portal.app.state.gns3_client = original
+
+
+def test_template_is_copied_in_the_background_with_progress(client, tmp_path, monkeypatch):
+    import time
+    snapshots_dir = tmp_path / "projects" / "lab-owned" / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    archive = b"PK" + b"x" * (3 * 1024 * 1024)
+    (snapshots_dir / "base.gns3snapshot").write_bytes(archive)
+    project = {"project_id": "lab-owned", "name": "Owner Lab", "path": str(snapshots_dir.parent), "status": "opened"}
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/snapshots"):
+            return httpx.Response(200, json=[{"snapshot_id": "snap-base", "name": "base"}])
+        if request.url.path.endswith("/nodes"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=project)
+
+    monkeypatch.setattr(portal, "GNS3_PROJECTS_DIR", tmp_path / "projects")
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    try:
+        login(client, "owner1", "owner1-password-1")
+        started = client.post("/projects/lab-owned/snapshots/snap-base/template", data={"name": "Base topology"}, follow_redirects=False)
+        location = started.headers["location"]
+        assert "template_job=" in location            # the request returns at once instead of copying
+        job_id = location.split("template_job=")[1].split("#")[0]
+        assert "data-template-job-url" in client.get(location.split("#")[0]).text
+        for _ in range(100):
+            job = client.get(f"/projects/lab-owned/template-jobs/{job_id}").json()
+            if job["status"] != "copying":
+                break
+            time.sleep(0.05)
+        assert job["status"] == "completed" and job["progress_percent"] == 100
+        template = next(item for item in portal.templates_for_user("owner1") if item["snapshot_id"] == "snap-base")
+        assert template["approval_status"] == "pending"   # a Lab Editor's template waits for approval
+        assert Path(template["archive_path"]).read_bytes() == archive
+        # Asking again is refused before any copy starts.
+        again = client.post("/projects/lab-owned/snapshots/snap-base/template", data={"name": "Again"}, follow_redirects=False)
+        assert "already+a+template" in again.headers["location"]
+        client.post("/logout")
+        # Another user cannot read the job.
+        login(client, "other1", "other1-password-1")
+        assert client.get(f"/projects/lab-owned/template-jobs/{job_id}").status_code == 404
         client.post("/logout")
     finally:
         portal.app.state.gns3_client = original

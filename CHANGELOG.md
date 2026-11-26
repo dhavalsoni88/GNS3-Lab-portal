@@ -7,6 +7,12 @@ are kept under **Upgrade notes**. For upgrading an installation, see
 
 ## v9.1.0 — Unreleased
 
+- **Make template no longer times out.** Copying a large backup into the
+  template archive ran inside the web request, so a proxy gave up with
+  "504 Gateway Time-out" after a minute. It now runs in the background and
+  the lab's Backups tab shows a progress bar; a backup that is already a
+  template is refused before any copy starts.
+
 - **Lab limit per user.** Each user may own 2 labs by default; administrators
   change it per user (**Labs allowed** on the Users page). It is checked
   before any lab is created: empty, from a backup or template, or uploaded.
