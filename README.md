@@ -1,5 +1,8 @@
 # GNS3 Lab Portal
 
+[![CI](https://github.com/dhavalsoni88/GNS3-Lab-portal/actions/workflows/ci.yml/badge.svg)](https://github.com/dhavalsoni88/GNS3-Lab-portal/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A self-hosted web portal that lets teams create, run, back up, share and reuse
 [GNS3](https://www.gns3.com/) network labs without giving everyone direct
 access to the GNS3 controller.
@@ -127,3 +130,8 @@ The portal controls access to labs through its own interface. Firewall the
 GNS3 API (port 3080) so only the portal host can reach it. Do not publish the
 GNS3 web interface to users you would not trust with the whole controller.
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE). GNS3 is a separate project with its own licence; this portal
+only talks to its REST API.

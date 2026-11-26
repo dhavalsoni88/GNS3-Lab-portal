@@ -42,8 +42,8 @@ In development; see the [roadmap](docs/roadmap.md).
 - End "view as user" as soon as the administrator loses the right to manage
   users.
 - Deleting a lab while keeping backups now copies every backup before
-  recording any, so a missing file or full disk leaves the lab and the
-  retained-backup quota untouched.
+  recording any, and undoes them if GNS3 refuses the delete, so a failure
+  leaves the lab and the retained-backup quota untouched.
 - Users can delete their retained backups to free a slot.
 - Limit uploads with `PORTAL_MAX_UPLOAD_BYTES` (default 50 GiB). The service
   buffers uploads in `data/uploads` instead of `/tmp`.
@@ -87,6 +87,8 @@ In development; see the [roadmap](docs/roadmap.md).
   owner or a Lab Manager.
 
 ### Deployment and repository
+
+- Publish under the MIT licence.
 
 - Add `PORTAL_COOKIE_SECURE` to send the session cookie only over HTTPS.
 - Change the built-in `GNS3_URL` default to `http://127.0.0.1:3080`. Set it

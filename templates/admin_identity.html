@@ -11,7 +11,6 @@
     </details>
   </div>
 </div>
-{% if weak_secret_key %}<p class="error">PORTAL_SECRET_KEY is missing, a placeholder or shorter than 32 characters. It encrypts directory passwords stored here: set a long random value in <code>.env</code> before adding a provider.</p>{% endif %}
 {% if not public_url %}<p class="notice">Single sign-on needs <code>PORTAL_PUBLIC_URL</code> in <code>.env</code>: the https:// address people use to reach the portal (for example <code>https://lab-portal.example.com</code>). SAML providers stay hidden on the sign-in page until it is set.</p>{% endif %}
 <div class="table-card">
   <table class="data responsive">

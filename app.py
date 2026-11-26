@@ -1230,7 +1230,6 @@ def provision_external_user(provider: dict[str, Any], identity: auth.ExternalIde
 
 
 def complete_login(request: Request, account: dict[str, Any], method: str, provider_id: str = "") -> RedirectResponse:
-    request.app.state.login_failures.pop(login_key(request, str(account["username"])), None)
     db.current_context()["actor"] = str(account["username"])
     with db.connect() as connection:
         connection.execute("UPDATE portal_users SET last_login_at=? WHERE username=?", (datetime.now(timezone.utc).isoformat(), account["username"]))
@@ -1276,6 +1275,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             with db.connect() as connection:
                 connection.execute("UPDATE portal_users SET password_hash=? WHERE username=?", (password_hash(password), account["username"]))
             audit(str(account["username"]), "password_rehashed", str(account["username"]), {"scheme": "argon2id"})
+        request.app.state.login_failures.pop(login_key(request, login_name), None)
         return complete_login(request, account, "local")
     if account and account.get("auth_source") == "saml":
         return login_failed(request, login_name, "sso_account", "This account signs in with single sign-on. Use the sign-in button for your organisation.")
@@ -1296,6 +1296,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
         if not account:
             message = "Your directory account has no portal role. Ask an administrator to map one of your groups." if reason == "no_role" else "Invalid username or password."
             return login_failed(request, login_name, reason, message, provider=provider["provider_id"])
+        request.app.state.login_failures.pop(login_key(request, login_name), None)
         return complete_login(request, account, "ldap", provider["provider_id"])
     if not account:
         await asyncio.to_thread(password_matches, password, DUMMY_PASSWORD_HASH)
@@ -1540,7 +1541,6 @@ async def identity_providers_page(request: Request):
     return templates.TemplateResponse(request, "admin_identity.html", {
         **base_context(request, "identity"), "providers": providers, "user_counts": counts,
         "public_url": PORTAL_PUBLIC_URL, "presets": auth.SAML_PRESETS,
-        "weak_secret_key": SECRET_KEY in WEAK_SECRET_KEYS or len(SECRET_KEY) < 32,
     })
 
 
@@ -2520,6 +2520,7 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
     if confirmation.strip() != project.get("name"):
         return RedirectResponse(f"/projects/{project_id}?error=Lab+name+did+not+match", status_code=303)
     retained = 0
+    copies: list[tuple[str, dict[str, Any], Path]] = []
     if retained_snapshot_ids:
         if not GNS3_PROJECTS_DIR:
             return RedirectResponse(f"/projects/{project_id}?error=Configure+GNS3_PROJECTS_DIR+before+keeping+backups", status_code=303)
@@ -2537,7 +2538,6 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
         if not all(source for _, source in sources):
             return RedirectResponse(f"/projects/{project_id}?error=One+or+more+native+backup+files+could+not+be+found", status_code=303)
         target_dir = RETAINED_BACKUP_DIR / project_id
-        copies: list[tuple[str, dict[str, Any], Path]] = []
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             for snapshot, source in sources:
@@ -2554,7 +2554,16 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
             for backup_id, snapshot, destination in copies:
                 connection.execute("INSERT INTO retained_backups(backup_id,owner,source_project_id,source_lab_name,backup_name,archive_path,size_bytes,retained_at) VALUES(?,?,?,?,?,?,?,?)", (backup_id, user, project_id, str(project.get("name", "Lab")), str(snapshot.get("name", "Unnamed backup")), str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat()))
         retained = len(copies)
-    await gns3("DELETE", f"/v2/projects/{project_id}")
+    try:
+        await gns3("DELETE", f"/v2/projects/{project_id}")
+    except HTTPException as exc:
+        # The lab still exists: undo the kept copies so a retry does not count them twice.
+        with db.connect() as connection:
+            for backup_id, _, _ in copies:
+                connection.execute("DELETE FROM retained_backups WHERE backup_id=?", (backup_id,))
+        for _, _, destination in copies:
+            destination.unlink(missing_ok=True)
+        return RedirectResponse(f"/projects/{project_id}?error={quote_plus(f'GNS3 did not delete the lab: {exc.detail}')}", status_code=303)
     with db.connect() as connection:
         connection.execute("DELETE FROM lab_owners WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM lab_shares WHERE project_id=?", (project_id,))

@@ -79,7 +79,8 @@ up the share.
 
 **Delete a lab and keep backups.** Every chosen snapshot file is found and
 copied first. Their records are then written together. Only after that is
-the lab deleted, so a failure leaves the lab and the user's quota untouched.
+the lab deleted; if GNS3 refuses, the copies and records are removed again,
+so a failure leaves the lab and the user's quota untouched.
 
 ## Security model
 
