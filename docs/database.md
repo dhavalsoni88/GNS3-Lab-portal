@@ -16,6 +16,7 @@ work, commits on success and rolls back on any error.
 | [`001_core.sql`](../database/mariadb/001_core.sql) | Core tables: users, sessions, owners, shares, retained backups, templates, audit log. |
 | [`002_audit.sql`](../database/mariadb/002_audit.sql) | Audit request context, append-only triggers and the change history. |
 | [`003_identity.sql`](../database/mariadb/003_identity.sql) | Sign-in sources, roles, identity providers and group mappings. |
+| [`004_lab_limit.sql`](../database/mariadb/004_lab_limit.sql) | Per-user lab limit; its changes are kept in the change history. |
 
 Migrations are applied once each, in order, and recorded in
 `schema_migrations`:

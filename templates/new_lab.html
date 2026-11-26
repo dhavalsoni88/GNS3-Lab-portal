@@ -7,6 +7,7 @@
   <div>
     <h1>New lab</h1>
     <p class="subtitle">Start empty, from an approved template, or from a backup. Labs made from backups are separate copies and start powered off.</p>
+    {% if lab_usage %}<p class="{{ 'error' if lab_usage.used >= lab_usage.limit else 'muted' }}" role="status">You have {{ lab_usage.used }} of {{ lab_usage.limit }} labs.{% if lab_usage.used >= lab_usage.limit %} Delete a lab or ask an administrator to raise your limit before creating another.{% endif %}</p>{% endif %}
   </div>
 </div>
 

@@ -31,6 +31,7 @@ PERMISSIONS = {
     "templates.approve": "Approve and publish lab templates",
     "audit.all": "Read the full audit log",
     "servers.view": "See server status",
+    "appliances.publish": "Publish GNS3 appliances to every lab",
 }
 
 ROLES: dict[str, tuple[str, frozenset[str]]] = {

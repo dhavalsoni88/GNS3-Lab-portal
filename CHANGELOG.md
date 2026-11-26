@@ -5,6 +5,19 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.1.0 — Unreleased
+
+- **Lab limit per user.** Each user may own 2 labs by default; administrators
+  change it per user (**Labs allowed** on the Users page). It is checked
+  before any lab is created: empty, from a backup or template, or uploaded.
+  Platform Admins and Lab Managers are not limited. Database migration
+  `004_lab_limit` adds the column and records limit changes in the change
+  history; `scripts/upgrade.sh` applies it.
+- **Publish appliances to every lab** (**Administration › Appliances**,
+  Platform Admins). Upload a QEMU `.gns3a` file and its disk images; the
+  portal verifies each image's checksum, uploads only images GNS3 lacks, and
+  registers the template. Existing templates and images are never replaced.
+
 ## v9.0.1 — Unreleased
 
 - `scripts/upgrade.sh` installs requirements with `python -m pip`. A `.venv`

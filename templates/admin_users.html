@@ -53,6 +53,7 @@
                 {% if account.group_roles %}<p class="muted" style="margin:0">From groups at last sign-in: {{ account.group_roles | map('role_name') | join(', ') }}. Change these with group mappings.</p>{% endif %}
                 <label class="inline-check"><input type="checkbox" name="enabled" value="1" {% if account.enabled %}checked{% endif %} {% if account.username == signed_in_user %}disabled{% endif %}> Account enabled</label>
                 {% if account.username == signed_in_user %}<input type="hidden" name="enabled" value="1"><p class="muted" style="margin:0">You cannot disable your own account.</p>{% endif %}
+                <label>Labs allowed<input name="lab_limit" type="number" min="0" max="100" value="{{ account.lab_limit if account.lab_limit is not none else 2 }}"></label>
                 <label>Retained backups allowed<input name="retained_backup_limit" type="number" min="0" max="100" value="{{ account.retained_backup_limit if account.retained_backup_limit is not none else 2 }}"></label>
                 {% if source == 'local' %}
                 <details>
