@@ -509,6 +509,7 @@ class SamlRequestStore:
     """
 
     TTL_SECONDS = 600
+    MAX_PENDING = 10_000  # caps memory when the unauthenticated sign-in URL is flooded
 
     def __init__(self) -> None:
         self._requests: dict[str, tuple[str, str, float]] = {}
@@ -525,6 +526,8 @@ class SamlRequestStore:
 
     def put(self, relay: str, provider_id: str, request_id: str) -> None:
         self._expire()
+        if len(self._requests) >= self.MAX_PENDING:
+            raise IdentityError("Too many sign-ins are in progress. Try again in a few minutes.")
         self._requests[relay] = (provider_id, request_id, time.monotonic())
 
     def take(self, relay: str) -> tuple[str, str] | None:

@@ -59,9 +59,11 @@ else
   echo "No SQLite database found at $SQLITE: the portal will start on an empty MariaDB."
 fi
 [[ -n "$(env_get GNS3_URL)" ]] || echo "WARNING: GNS3_URL is not set in .env; the default is now http://127.0.0.1:3080."
+[[ "$(env_get PORTAL_COOKIE_SECURE)" == false ]] && echo "WARNING: .env has PORTAL_COOKIE_SECURE=false, so session cookies can travel over plain HTTP. Remove that line if the portal is served over HTTPS."
 
 step "Backing up .env to .env.backup-$STAMP"
 cp -a "$ENV_FILE" "$ENV_FILE.backup-$STAMP"
+chmod 600 "$ENV_FILE.backup-$STAMP"  # holds the GNS3 and admin passwords
 
 KEY=$(env_get PORTAL_SECRET_KEY)
 if [[ ${#KEY} -lt 32 || "$KEY" == change-this-before-production || "$KEY" == replace-with-a-long-random-value ]]; then

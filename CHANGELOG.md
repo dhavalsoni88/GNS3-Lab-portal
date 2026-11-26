@@ -5,9 +5,11 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
-## Unreleased — v9.0.0
+## v9.0.0 — 2026-11-26
 
-In development; see the [roadmap](docs/roadmap.md).
+Upgrade any server with `git pull` followed by `sudo bash scripts/upgrade.sh`
+([docs/upgrading.md](docs/upgrading.md)). SQLite installs move to MariaDB in
+that step. Take a server snapshot first.
 
 ### Database and audit
 
@@ -35,6 +37,22 @@ In development; see the [roadmap](docs/roadmap.md).
 ### Security and reliability
 
 - Sign-in is on by default (`PORTAL_AUTH_ENABLED` now defaults to `true`).
+- Changing your own password asks for the current one. An administrator's
+  password reset signs that user out everywhere.
+- Refuse form posts from other websites (an `Origin` check), including
+  sibling subdomains that the browser's SameSite rule lets through.
+- The session cookie is HTTPS-only by default when `PORTAL_PUBLIC_URL` is
+  `https://`.
+- Refuse `.` and `..` in lab and backup IDs before calling GNS3; a backup ID
+  of `..` could turn "delete backup" into "delete lab".
+- Users no longer see GNS3's raw error text; it stays in `gns3-api.log`.
+- Cap pending SAML sign-ins in memory, and rate-limit sign-in pages in the
+  Nginx sample. The sample now also loads on Nginx 1.18 and 1.24 (Ubuntu
+  22.04 and 24.04).
+- Only the person who started a lab import, or a Lab Manager, can read its
+  progress.
+- Remove the template "access" list. It never restricted anything: approved
+  templates are available to everyone.
 - Refuse to start with a placeholder or short `PORTAL_SECRET_KEY`. A known
   key would let a user forge "view as" sessions.
 - Lock a name for 15 minutes after five failed sign-ins from one address.

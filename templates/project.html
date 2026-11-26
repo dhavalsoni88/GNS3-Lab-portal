@@ -128,15 +128,6 @@
                   <form class="shared-user" method="post" action="/projects/{{ project.project_id }}/snapshots/{{ snapshot.snapshot_id }}/shares/{{ username }}/remove"><span>{{ username }}</span><button class="link">Remove</button></form>
                   {% endfor %}
                 </div>
-                {% if template %}
-                <div class="menu-section">
-                  <h3>Template access</h3>
-                  <form method="post" action="/templates/{{ template.template_id }}/access"><label class="visually-hidden" for="template-share-{{ loop.index }}">Username</label><input id="template-share-{{ loop.index }}" name="username" list="shareable-users" autocomplete="off" placeholder="Username" required><button>Grant</button></form>
-                  {% for username in template_access.get(template.template_id, []) %}
-                  <form class="shared-user" method="post" action="/templates/{{ template.template_id }}/access/{{ username }}/remove"><span>{{ username }}</span><button class="link">Remove</button></form>
-                  {% endfor %}
-                </div>
-                {% endif %}
                 {% endif %}
               </div>
             </details>

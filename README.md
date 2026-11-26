@@ -105,13 +105,12 @@ sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
 
 ## Project status
 
-The current release line is **v8.6**, in production use. **v9.0** is in
-development on this branch. It runs on MariaDB only; existing SQLite
-installs move with a verified script ([upgrading](docs/upgrading.md#moving-from-sqlite-to-mariadb)).
-The database layer, audit logging, the new
-interface, roles, Active Directory and SSO are complete. Multi-server
-clusters, the one-step installer and on-demand AWS servers are next. See the
-[roadmap](docs/roadmap.md).
+The current release is **v9.0.0**: MariaDB only, roles, Active Directory and
+SSO, tamper-resistant audit and the new interface. Existing v8.x (SQLite)
+servers upgrade in one step with `scripts/upgrade.sh`
+([upgrading](docs/upgrading.md)). Multi-server clusters, the one-step
+installer and on-demand AWS servers are next. See the
+[roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
 
 ## Development
 

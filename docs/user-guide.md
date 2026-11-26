@@ -135,7 +135,8 @@ Admin role see the full **Audit log**, including source IP addresses and
 failed sign-ins.
 
 **My profile** holds your name, email and photo (JPG, PNG or WebP, up to
-2 MiB). Local-account users can change their password there. Usernames cannot
+2 MiB). Local-account users can change their password there; enter the
+current password first. Usernames cannot
 change because they identify lab ownership.
 
 ## View as user

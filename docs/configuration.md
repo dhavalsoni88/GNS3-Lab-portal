@@ -25,7 +25,7 @@ loads them from `/opt/gns3-lab-portal/.env`; start from
 | `PORTAL_USERNAME`, `PORTAL_PASSWORD` | `portaladmin` / placeholder | First local Platform Admin, created only when the database is new. |
 | `PORTAL_SECRET_KEY` | placeholder | Signs session cookies and encrypts stored directory passwords. The portal **refuses to start** unless it is 32+ characters and not a shipped placeholder. Generate one with `openssl rand -hex 32` and keep it stable. |
 | `PORTAL_PUBLIC_URL` | empty | Public `https://` address of the portal. Required for SAML single sign-on. |
-| `PORTAL_COOKIE_SECURE` | `false` | Send the session cookie only over HTTPS. Set `true` once behind TLS. |
+| `PORTAL_COOKIE_SECURE` | `true` when `PORTAL_PUBLIC_URL` is `https://`, else `false` | Send the session cookie only over HTTPS. Set `false` only for plain-HTTP testing. |
 | `PORTAL_SESSION_IDLE_SECONDS` | `1800` | Sign out after this long without activity. |
 | `PORTAL_SESSION_MAX_SECONDS` | `28800` | Sign out after this long regardless of activity. |
 | `PORTAL_TRUSTED_PROXIES` | `127.0.0.1,::1` | Proxies whose `X-Forwarded-For` header is trusted for audit source IPs. |
