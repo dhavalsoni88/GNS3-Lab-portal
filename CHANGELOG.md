@@ -11,8 +11,16 @@ In development; see the [roadmap](docs/roadmap.md).
 
 ### Database and audit
 
-- Run the portal on SQLite or MariaDB through one database layer
-  (`portal_db.py`), selected with `PORTAL_DB_BACKEND`.
+- **MariaDB is now the only database.** SQLite support and its schema code
+  are removed. The portal refuses to start with `PORTAL_DB_BACKEND=sqlite`,
+  or on an empty MariaDB while an old SQLite `audit.db` exists. Move existing
+  data with `scripts/migrate-sqlite-to-mariadb.py`
+  ([upgrading.md](docs/upgrading.md#moving-from-sqlite-to-mariadb)). The
+  script now also copies roles, identity providers and group mappings from
+  v9-preview SQLite installs.
+- Add `scripts/upgrade.sh`: after `git pull`, one command upgrades any
+  server, moving SQLite installs to MariaDB with a verified copy.
+- One database layer (`portal_db.py`).
 - Add versioned MariaDB migrations, `scripts/setup-mariadb.sh` (least-privilege
   accounts, server audit plugin), and a verified, re-runnable
   SQLite-to-MariaDB data migration.
@@ -22,7 +30,28 @@ In development; see the [roadmap](docs/roadmap.md).
   and new values, without password hashes) for users, lab ownership, shares,
   retained backups and templates.
 - Hash passwords with Argon2id and upgrade v8.x scrypt hashes at sign-in.
-- Add automated tests for both database backends.
+- Add automated tests, run on MariaDB.
+
+### Security and reliability
+
+- Sign-in is on by default (`PORTAL_AUTH_ENABLED` now defaults to `true`).
+- Refuse to start with a placeholder or short `PORTAL_SECRET_KEY`. A known
+  key would let a user forge "view as" sessions.
+- Lock a name for 15 minutes after five failed sign-ins from one address.
+  Unknown names take as long to refuse as wrong passwords.
+- End "view as user" as soon as the administrator loses the right to manage
+  users.
+- Deleting a lab while keeping backups now copies every backup before
+  recording any, and undoes them if GNS3 refuses the delete, so a failure
+  leaves the lab and the retained-backup quota untouched.
+- Users can delete their retained backups to free a slot.
+- Limit uploads with `PORTAL_MAX_UPLOAD_BYTES` (default 50 GiB). The service
+  buffers uploads in `data/uploads` instead of `/tmp`.
+- Refuse restore, backup deletion and lab deletion while a backup is running.
+- All lab imports share one path, so every import kind follows the same
+  rules (one at a time, name checks, owner checks).
+- The labs page makes about ten database queries in total instead of about
+  eleven per lab.
 
 ### Interface
 
@@ -58,6 +87,8 @@ In development; see the [roadmap](docs/roadmap.md).
   owner or a Lab Manager.
 
 ### Deployment and repository
+
+- Publish under the MIT licence.
 
 - Add `PORTAL_COOKIE_SECURE` to send the session cookie only over HTTPS.
 - Change the built-in `GNS3_URL` default to `http://127.0.0.1:3080`. Set it

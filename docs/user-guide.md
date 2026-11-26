@@ -3,6 +3,14 @@
 What you can do depends on your role; see [authentication.md](authentication.md#roles).
 Buttons you are not allowed to use are not shown.
 
+## Signing in
+
+Sign in with your portal account, your directory (Windows) account, or your
+organisation's single sign-on button, whichever your administrator set up.
+After five wrong passwords in a row, your name is locked for 15 minutes on
+that computer; wait, or ask an administrator. Sessions end after 30 minutes
+without activity, after 8 hours in total, and whenever the portal restarts.
+
 ## Labs
 
 **Labs** lists the labs you own and the labs shared with you. Lab Managers and
@@ -35,7 +43,7 @@ Use the status chips and the search box to narrow the list.
 - **From a backup**: a copy of a backup of one of your labs, of a backup shared
   with you, or of a retained backup from a deleted lab.
 - **Upload a backup file**: a `.gns3snapshot` or `.gns3project` from your
-  computer.
+  computer, up to 50 GiB unless your administrator set another limit.
 
 Labs made from backups or templates are separate copies with new IDs. They
 start powered off, and the source is never changed. Progress is shown while
@@ -115,6 +123,10 @@ archive. Each user may keep two by default. An administrator can change your
 allowance on the Users page. Retained backups appear under **New lab › From a
 backup**. Lowering an allowance never deletes existing copies; it only blocks
 new ones.
+
+To free a slot, select the backup there and choose **Delete selected
+backup**. This permanently removes the copy. Labs already created from it are
+not affected. Lab Managers can delete anyone's retained backups.
 
 ## Activity and profile
 

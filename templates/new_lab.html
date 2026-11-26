@@ -66,7 +66,8 @@
   <form class="form-stack" method="post" action="/retained-backup-imports">
     <label>Backup<select name="backup_id">{% for backup in retained_backups %}<option value="{{ backup.backup_id }}">{{ backup.source_lab_name }} — {{ backup.backup_name }} ({{ backup.size_bytes | storage_size }})</option>{% endfor %}</select></label>
     <label>Name for the new lab<input name="name" maxlength="80" required></label>
-    <div><button class="primary big">Create lab from retained backup</button></div>
+    <div><button class="primary big">Create lab from retained backup</button>
+      <button class="danger" formaction="/retained-backups/delete" formnovalidate onclick="return confirm('Permanently delete the selected retained backup? This frees one retained-backup slot.')">Delete selected backup</button></div>
   </form>
   {% endif %}
 </section>

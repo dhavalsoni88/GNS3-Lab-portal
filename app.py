@@ -15,7 +15,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-from urllib.parse import quote, quote_plus, urlsplit
+from urllib.parse import quote, quote_plus
 
 import httpx
 from fastapi import File, FastAPI, Form, HTTPException, Request, UploadFile, status
@@ -49,7 +49,7 @@ SECRET_KEY = os.getenv("PORTAL_SECRET_KEY", "change-this-before-production")
 PORTAL_PUBLIC_URL = os.getenv("PORTAL_PUBLIC_URL", "").strip().rstrip("/")
 # Send the session cookie only over HTTPS. Enable once the portal is behind TLS.
 PORTAL_COOKIE_SECURE = os.getenv("PORTAL_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
-AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+AUTH_ENABLED = os.getenv("PORTAL_AUTH_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 SESSION_IDLE_SECONDS = max(60, int(os.getenv("PORTAL_SESSION_IDLE_SECONDS", "1800")))
 SESSION_MAX_SECONDS = max(SESSION_IDLE_SECONDS, int(os.getenv("PORTAL_SESSION_MAX_SECONDS", "28800")))
 PORTAL_DB_AUTO_MIGRATE = os.getenv("PORTAL_DB_AUTO_MIGRATE", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -58,6 +58,9 @@ PORTAL_TRUSTED_PROXIES = frozenset(item.strip() for item in os.getenv("PORTAL_TR
 UPLOAD_DIR = Path(os.getenv("PORTAL_UPLOAD_DIR", str(BASE_DIR / "data" / "uploads")))
 USER_AVATAR_DIR = Path(os.getenv("PORTAL_AVATAR_DIR", str(BASE_DIR / "data" / "avatars"))).expanduser()
 MAX_AVATAR_BYTES = 2 * 1024 * 1024
+MAX_UPLOAD_BYTES = int(os.getenv("PORTAL_MAX_UPLOAD_BYTES", str(50 * 1024**3)))
+# Known placeholder values; a session cookie signed with one of these can be forged.
+WEAK_SECRET_KEYS = {"change-this-before-production", "replace-with-a-long-random-value"}
 RETAINED_BACKUP_DIR = Path(os.getenv("RETAINED_BACKUP_DIR", "/mnt/HDD_STORE/my-lab-retained-backups")).expanduser()
 LAB_TEMPLATE_DIR = Path(os.getenv("LAB_TEMPLATE_DIR", "/mnt/HDD_STORE/my-lab-templates")).expanduser()
 # Optional local root used to report native snapshot storage sizes. The GNS3
@@ -191,111 +194,33 @@ def safe_avatar_path(filename: str | None) -> Path | None:
 
 
 def init_db() -> None:
+    if AUTH_ENABLED and (SECRET_KEY in WEAK_SECRET_KEYS or len(SECRET_KEY) < 32):
+        raise RuntimeError("PORTAL_SECRET_KEY is a placeholder or shorter than 32 characters. Set a long random value, for example: python3 -c 'import secrets; print(secrets.token_urlsafe(48))'")
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     USER_AVATAR_DIR.mkdir(parents=True, exist_ok=True)
     RETAINED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     LAB_TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
-    if db.BACKEND == "mariadb":
-        # In production the application account has no DDL rights; the
-        # installer applies migrations with the separate migration account.
-        if PORTAL_DB_AUTO_MIGRATE:
-            db.apply_mariadb_migrations()
-        pending = db.pending_mariadb_migrations()
-        if pending:
-            raise RuntimeError(f"MariaDB schema migrations are pending: {', '.join(pending)}. Run: python3 portal_db.py migrate")
+    # In production the application account has no DDL rights; the
+    # installer applies migrations with the separate migration account.
+    if PORTAL_DB_AUTO_MIGRATE:
+        db.apply_mariadb_migrations()
+    pending = db.pending_mariadb_migrations()
+    if pending:
+        raise RuntimeError(f"MariaDB schema migrations are pending: {', '.join(pending)}. Run: python3 portal_db.py migrate")
     with db.connect() as connection:
-        if db.BACKEND == "sqlite":
-            init_sqlite_schema(connection)
         connection.execute("DELETE FROM portal_sessions WHERE expires_at < ?", (datetime.now(timezone.utc).isoformat(),))
-        # Preserve the prior deployment path: the existing environment login
-        # becomes the first local administrator on the first RBAC startup.
         existing = connection.execute("SELECT 1 FROM portal_users LIMIT 1").fetchone()
+        if not existing and db.LEGACY_SQLITE_PATH.is_file():
+            # Starting empty here would hide every existing user, owner and share.
+            raise RuntimeError(f"MariaDB has no portal users but a SQLite database exists at {db.LEGACY_SQLITE_PATH}. "
+                               "Run scripts/migrate-sqlite-to-mariadb.py first (docs/upgrading.md), or move that file away to start fresh.")
+        # The environment login becomes the first local administrator of a new install.
         if not existing:
             connection.execute(
                 "INSERT INTO portal_users(username,password_hash,role,enabled,created_at) VALUES(?,?,?,?,?)",
                 (PORTAL_USERNAME, password_hash(PORTAL_PASSWORD), "admin", 1, datetime.now(timezone.utc).isoformat()),
             )
     auth.seed_roles_from_legacy()
-
-
-def init_sqlite_schema(connection: db.Connection) -> None:
-    """Create or upgrade the SQLite schema. MariaDB uses database/mariadb/*.sql."""
-    connection.execute("""CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY, timestamp TEXT NOT NULL, actor TEXT NOT NULL,
-        action TEXT NOT NULL, target TEXT NOT NULL, details TEXT
-    )""")
-    audit_columns = {row[1] for row in connection.execute("PRAGMA table_info(audit_log)")}
-    for name, column_type in (("source_ip", "TEXT"), ("user_agent", "TEXT"), ("request_id", "TEXT"), ("outcome", "TEXT NOT NULL DEFAULT 'success'")):
-        if name not in audit_columns:
-            connection.execute(f"ALTER TABLE audit_log ADD COLUMN {name} {column_type}")
-    connection.execute("""CREATE TABLE IF NOT EXISTS portal_users (
-        username TEXT PRIMARY KEY COLLATE NOCASE, password_hash TEXT NOT NULL,
-        role TEXT NOT NULL CHECK(role IN ('admin', 'user')), enabled INTEGER NOT NULL DEFAULT 1,
-        created_at TEXT NOT NULL
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS portal_sessions (
-        session_id_hash TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
-        issued_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-        server_epoch TEXT NOT NULL
-    )""")
-    connection.execute("CREATE INDEX IF NOT EXISTS portal_sessions_username ON portal_sessions(username)")
-    user_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
-    for name in ("email", "first_name", "last_name", "avatar_filename", "retained_backup_limit"):
-        if name not in user_columns:
-            column_type = "INTEGER NOT NULL DEFAULT 2" if name == "retained_backup_limit" else "TEXT"
-            connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
-    connection.execute("""CREATE TABLE IF NOT EXISTS lab_owners (
-        project_id TEXT PRIMARY KEY, username TEXT NOT NULL COLLATE NOCASE,
-        assigned_at TEXT NOT NULL
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS retained_backups (
-        backup_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
-        source_project_id TEXT NOT NULL, source_lab_name TEXT NOT NULL,
-        backup_name TEXT NOT NULL, archive_path TEXT NOT NULL UNIQUE,
-        size_bytes INTEGER NOT NULL, retained_at TEXT NOT NULL
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS lab_shares (
-        project_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
-        shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
-        PRIMARY KEY(project_id, username)
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS backup_shares (
-        project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL, username TEXT NOT NULL COLLATE NOCASE,
-        shared_by TEXT NOT NULL COLLATE NOCASE, shared_at TEXT NOT NULL,
-        PRIMARY KEY(project_id, snapshot_id, username)
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS lab_templates (
-        template_id TEXT PRIMARY KEY, owner TEXT NOT NULL COLLATE NOCASE,
-        source_project_id TEXT NOT NULL, snapshot_id TEXT NOT NULL,
-        name TEXT NOT NULL, description TEXT, archive_path TEXT, size_bytes INTEGER,
-        created_at TEXT NOT NULL,
-        UNIQUE(source_project_id, snapshot_id)
-    )""")
-    template_columns = {row[1] for row in connection.execute("PRAGMA table_info(lab_templates)")}
-    for name, column_type in (("archive_path", "TEXT"), ("size_bytes", "INTEGER"), ("approval_status", "TEXT NOT NULL DEFAULT 'approved'"), ("approved_by", "TEXT"), ("approved_at", "TEXT")):
-        if name not in template_columns:
-            connection.execute(f"ALTER TABLE lab_templates ADD COLUMN {name} {column_type}")
-    for name, column_type in (("auth_source", "TEXT NOT NULL DEFAULT 'local'"), ("auth_provider", "TEXT"), ("external_id", "TEXT"), ("last_login_at", "TEXT")):
-        if name not in {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}:
-            connection.execute(f"ALTER TABLE portal_users ADD COLUMN {name} {column_type}")
-    connection.execute("""CREATE TABLE IF NOT EXISTS user_roles (
-        username TEXT NOT NULL COLLATE NOCASE, role_key TEXT NOT NULL, source TEXT NOT NULL,
-        assigned_at TEXT NOT NULL, PRIMARY KEY(username, role_key, source)
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS identity_providers (
-        provider_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('ldap','saml')), name TEXT NOT NULL,
-        enabled INTEGER NOT NULL DEFAULT 0, config TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS group_role_mappings (
-        provider_id TEXT NOT NULL, group_id TEXT NOT NULL COLLATE NOCASE, group_name TEXT NOT NULL,
-        role_key TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
-        PRIMARY KEY(provider_id, group_id, role_key)
-    )""")
-    connection.execute("""CREATE TABLE IF NOT EXISTS lab_template_access (
-        template_id TEXT NOT NULL, subject_type TEXT NOT NULL CHECK(subject_type IN ('local_user','directory_group')),
-        subject_id TEXT NOT NULL COLLATE NOCASE, granted_by TEXT NOT NULL COLLATE NOCASE,
-        granted_at TEXT NOT NULL, PRIMARY KEY(template_id, subject_type, subject_id)
-    )""")
 
 
 def audit(actor: str, action: str, target: str, details: dict[str, Any] | None = None, outcome: str = "success") -> None:
@@ -313,7 +238,7 @@ def recent_audit(limit: int = 20, username: str | None = None, include_all: bool
         if include_all or not username:
             rows = connection.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         else:
-            rows = connection.execute("SELECT * FROM audit_log WHERE actor=? OR actor LIKE ? ORDER BY id DESC LIMIT ?", (username, f"% impersonating {username}", limit)).fetchall()
+            rows = connection.execute("SELECT * FROM audit_log WHERE actor=? OR actor LIKE ? ORDER BY id DESC LIMIT ?", (username, "% impersonating " + username.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"), limit)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -482,6 +407,8 @@ async def lifespan(app_instance: FastAPI):
     init_db()
     # This in-memory value changes on every service start, invalidating every
     # prior browser session even though the session cookie remains on a laptop.
+    # shortcut: the epoch, jobs, SAML requests and sign-in counts below live in this one
+    # process; run a single uvicorn worker, and move them to MariaDB before clustering.
     app_instance.state.session_epoch = secrets.token_urlsafe(24)
     # Reuse a bounded pool for normal controller API calls.  Creating a new
     # AsyncClient for each dashboard request can briefly create hundreds of
@@ -494,6 +421,7 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.import_jobs = {}
     app_instance.state.monitor_disk_samples = {}
     app_instance.state.saml_requests = auth.SamlRequestStore()
+    app_instance.state.login_failures = {}
     try:
         yield
     finally:
@@ -544,6 +472,7 @@ def session_token_hash(token: str) -> str:
 
 
 def revoke_portal_session(request: Request) -> None:
+    db.current_context().pop("_signed_in", None)
     token = str(request.session.get("sid") or "")
     if token:
         with db.connect() as connection:
@@ -594,22 +523,29 @@ def create_portal_session(request: Request, username: str) -> None:
         )
     request.session.clear()
     request.session["sid"] = token
+    db.current_context().pop("_signed_in", None)
 
 
 def current_user(request: Request) -> str:
     """Return the effective portal identity for authorization and ownership."""
     if not AUTH_ENABLED:
         return "anonymous"
-    signed_in_user(request)
-    user = request.session.get("impersonating") or signed_in_user(request)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    return str(user)
+    signed_in = signed_in_user(request)
+    impersonating = request.session.get("impersonating")
+    if impersonating and "users.manage" not in auth.user_permissions(signed_in):
+        # The admin lost the right to view as others after starting it.
+        request.session.pop("impersonating", None)
+        impersonating = None
+    return str(impersonating or signed_in)
 
 
 def signed_in_user(request: Request) -> str:
     if not AUTH_ENABLED:
         return "anonymous"
+    # Pages call this many times; one session check per request is enough.
+    cached = db.current_context().get("_signed_in")
+    if cached:
+        return cached
     session = active_portal_session(request)
     if not session:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
@@ -619,6 +555,7 @@ def signed_in_user(request: Request) -> str:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     impersonating = request.session.get("impersonating")
     db.current_context()["actor"] = f"{account['username']} impersonating {impersonating}" if impersonating else str(account["username"])
+    db.current_context()["_signed_in"] = str(account["username"])
     return str(account["username"])
 
 
@@ -1232,7 +1169,29 @@ def login_context(error: str | None = None) -> dict[str, Any]:
     }
 
 
+LOGIN_FAILURE_LIMIT = 5
+LOGIN_LOCK_SECONDS = 900
+# Verified against when a username is unknown, so both paths take the same time.
+DUMMY_PASSWORD_HASH = password_hasher.hash(secrets.token_urlsafe(16))
+
+
+def login_key(request: Request, login_name: str) -> str:
+    return f"{login_name.lower()}|{db.current_context().get('source_ip', '')}"
+
+
+def login_locked(request: Request, login_name: str) -> bool:
+    """True after LOGIN_FAILURE_LIMIT failures for this name and IP within LOGIN_LOCK_SECONDS."""
+    # shortcut: counts live in this process only; move to MariaDB before running several portal servers.
+    cutoff = perf_counter() - LOGIN_LOCK_SECONDS
+    failures = request.app.state.login_failures
+    for key in [key for key, times in failures.items() if times[-1] < cutoff]:
+        del failures[key]
+    recent = [moment for moment in failures.get(login_key(request, login_name), []) if moment >= cutoff]
+    return len(recent) >= LOGIN_FAILURE_LIMIT
+
+
 def login_failed(request: Request, login_name: str, reason: str, message: str = "Invalid username or password.", **details: Any) -> HTMLResponse:
+    request.app.state.login_failures.setdefault(login_key(request, login_name), []).append(perf_counter())
     audit(login_name[:255] or "(blank)", "login_failed", "portal", {"reason": reason, **details}, outcome="failure")
     return templates.TemplateResponse(request, "login.html", login_context(message), status_code=401)
 
@@ -1302,17 +1261,21 @@ async def login(request: Request, username: str = Form(...), password: str = For
     if not AUTH_ENABLED:
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
     login_name = username.strip()
+    if login_locked(request, login_name):
+        audit(login_name[:255] or "(blank)", "login_failed", "portal", {"reason": "locked"}, outcome="failure")
+        return templates.TemplateResponse(request, "login.html", login_context("Too many failed sign-ins. Wait 15 minutes and try again."), status_code=429)
     account = user_record(login_name) or user_record(auth.normalise_login_name(login_name))
     if account and account.get("auth_source", "local") == "local":
         if not account.get("enabled"):
             return login_failed(request, login_name, "disabled")
-        if not password_matches(password, str(account.get("password_hash", ""))):
+        if not await asyncio.to_thread(password_matches, password, str(account.get("password_hash", ""))):
             return login_failed(request, login_name, "bad_password")
         if password_needs_rehash(str(account["password_hash"])):
             db.current_context()["actor"] = str(account["username"])
             with db.connect() as connection:
                 connection.execute("UPDATE portal_users SET password_hash=? WHERE username=?", (password_hash(password), account["username"]))
             audit(str(account["username"]), "password_rehashed", str(account["username"]), {"scheme": "argon2id"})
+        request.app.state.login_failures.pop(login_key(request, login_name), None)
         return complete_login(request, account, "local")
     if account and account.get("auth_source") == "saml":
         return login_failed(request, login_name, "sso_account", "This account signs in with single sign-on. Use the sign-in button for your organisation.")
@@ -1333,7 +1296,10 @@ async def login(request: Request, username: str = Form(...), password: str = For
         if not account:
             message = "Your directory account has no portal role. Ask an administrator to map one of your groups." if reason == "no_role" else "Invalid username or password."
             return login_failed(request, login_name, reason, message, provider=provider["provider_id"])
+        request.app.state.login_failures.pop(login_key(request, login_name), None)
         return complete_login(request, account, "ldap", provider["provider_id"])
+    if not account:
+        await asyncio.to_thread(password_matches, password, DUMMY_PASSWORD_HASH)
     return login_failed(request, login_name, "unknown_user" if not account else "bad_password")
 
 
@@ -1575,7 +1541,6 @@ async def identity_providers_page(request: Request):
     return templates.TemplateResponse(request, "admin_identity.html", {
         **base_context(request, "identity"), "providers": providers, "user_counts": counts,
         "public_url": PORTAL_PUBLIC_URL, "presets": auth.SAML_PRESETS,
-        "weak_secret_key": SECRET_KEY in {"change-this-before-production", "replace-with-a-long-random-value"} or len(SECRET_KEY) < 32,
     })
 
 
@@ -1794,6 +1759,7 @@ async def share_backup(request: Request, project_id: str, snapshot_id: str, user
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/shares/{username}/remove")
 async def remove_backup_share(request: Request, project_id: str, snapshot_id: str, username: str):
+    require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     if not can_manage_lab_sharing(request, project_id):
         raise HTTPException(403, "Only the lab owner or an Administrator can change backup sharing.")
@@ -2012,6 +1978,13 @@ async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
             except (OSError, ValueError):
                 continue
             pending_templates.append(template)
+    # One query each for owners and shares, instead of several per lab.
+    with db.connect() as connection:
+        owners = {str(row[0]): str(row[1]) for row in connection.execute("SELECT project_id, username FROM lab_owners").fetchall()}
+        shares: dict[str, list[str]] = {}
+        for row in connection.execute("SELECT project_id, username FROM lab_shares ORDER BY username").fetchall():
+            shares.setdefault(str(row[0]), []).append(str(row[1]))
+    user, admin_scope = current_user(request), has_admin_scope(request)
     # The dashboard action is deliberately derived from node state, rather
     # than project open/closed state. Built-in Cloud and Ethernet switch nodes
     # are always reported as started by GNS3 and are not lab workloads.
@@ -2024,10 +1997,10 @@ async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
         backup_times = [format_backup_datetime(item.get("created_at")) for item in snapshots if item.get("created_at")]
         project["last_backup_at"] = max((value for value in backup_times if value[:1].isdigit()), default="")
         project["access_lab_url"] = gns3_webui_project_url(project["project_id"])
-        project["owner"] = lab_owner(project["project_id"]) or "Unassigned"
-        project["shared_with"] = shared_users(project["project_id"])
-        project["can_share"] = can_manage_lab_sharing(request, project["project_id"])
-        project["lab_group"] = "user" if has_admin_scope(request) and project["owner"] not in {current_user(request), "Unassigned"} else "mine"
+        project["owner"] = owners.get(project["project_id"]) or "Unassigned"
+        project["shared_with"] = shares.get(project["project_id"], [])
+        project["can_share"] = admin_scope or project["owner"] == user
+        project["lab_group"] = "user" if admin_scope and project["owner"] not in {user, "Unassigned"} else "mine"
     return {
         "projects": projects, "import_sources": import_sources, "shared_backup_sources": shared_backup_sources, "available_templates": available_templates, "pending_templates": pending_templates, "user": current_user(request),
         "signed_in_user": signed_in_user(request), "is_admin": is_admin(request), "can_manage_users": can_manage_users(request),
@@ -2116,7 +2089,6 @@ def redirect_back(return_to: str, project_id: str, query: str = "") -> RedirectR
 @app.post("/projects/{project_id}/start")
 async def start_lab(request: Request, project_id: str, return_to: str = Form("")):
     require_permission(request, "labs.operate")
-    user = current_user(request)
     require_project_access(request, project_id)
     if backup_is_active(project_id):
         return redirect_back(return_to, project_id, "error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+starting+nodes")
@@ -2131,7 +2103,6 @@ async def start_lab(request: Request, project_id: str, return_to: str = Form("")
 @app.post("/projects/{project_id}/stop")
 async def stop_lab(request: Request, project_id: str, return_to: str = Form("")):
     require_permission(request, "labs.operate")
-    user = current_user(request)
     require_project_access(request, project_id)
     if backup_is_active(project_id):
         return redirect_back(return_to, project_id, "error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish+before+stopping+nodes")
@@ -2197,6 +2168,7 @@ async def create_snapshot(request: Request, project_id: str, name: str = Form(..
         return RedirectResponse(f"/projects/{project_id}?error=A+backup+is+already+running+for+this+lab", status_code=303)
     job_id = str(uuid.uuid4())
     job = {"project_id": project_id, "name": name, "actor": user, "audit_actor": audit_actor(request), "status": "queued", "progress_percent": 0, "progress_is_estimated": False, "message": "Backup queued…", "snapshot_id": None, "cancel_requested": False, "created_at": datetime.now(timezone.utc).isoformat(), "completed_at": None}
+    prune_jobs(app.state.backup_jobs)
     app.state.backup_jobs[job_id] = job
     asyncio.create_task(run_backup_job(job))
     return RedirectResponse(f"/projects/{project_id}?backup_job={job_id}", status_code=303)
@@ -2235,7 +2207,6 @@ async def cancel_backup_job(request: Request, project_id: str, job_id: str):
 @app.get("/projects/{project_id}/export")
 async def export_project(request: Request, project_id: str):
     """Download a controller-generated portable project archive for sharing."""
-    user = current_user(request)
     require_project_access(request, project_id)
     try:
         project = await gns3("GET", f"/v2/projects/{project_id}")
@@ -2253,7 +2224,6 @@ async def export_project(request: Request, project_id: str):
 @app.get("/projects/{project_id}/snapshots/{snapshot_id}/download")
 async def download_snapshot(request: Request, project_id: str, snapshot_id: str):
     """Download one native snapshot for controlled sharing or off-server storage."""
-    user = current_user(request)
     require_project_access(request, project_id)
     try:
         project = await gns3("GET", f"/v2/projects/{project_id}")
@@ -2268,41 +2238,54 @@ async def download_snapshot(request: Request, project_id: str, snapshot_id: str)
     return FileResponse(snapshot_path, media_type="application/gns3project", filename=snapshot_path.name)
 
 
-async def queue_snapshot_import(request: Request, project_id: str, snapshot_id: str, name: str) -> RedirectResponse:
-    """Queue a distinct stopped lab from a source project's native snapshot."""
-    user = current_user(request)
-    require_project_access(request, project_id)
+ACTIVE_IMPORT_STATES = frozenset({"preparing", "importing"})
+
+
+def prune_jobs(jobs: dict[str, dict[str, Any]], keep: int = 100) -> None:
+    """Drop all but the newest finished jobs; running jobs are never dropped."""
+    finished = [key for key, job in jobs.items() if job.get("status") not in ACTIVE_BACKUP_STATES | ACTIVE_IMPORT_STATES]
+    for key in finished[:-keep]:
+        del jobs[key]
+
+
+def import_running() -> bool:
+    # One import at a time: each one streams a multi-gigabyte archive to GNS3.
+    return any(job.get("status") in ACTIVE_IMPORT_STATES for job in app.state.import_jobs.values())
+
+
+def start_import(request: Request, name: str, message: str, **source: Any) -> tuple[RedirectResponse, bool]:
+    """Queue a new powered-off lab from a backup, template, retained backup or upload. Returns (redirect, queued)."""
     new_name = name.strip()
     if not new_name or len(new_name) > 80:
-        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
-    if not GNS3_PROJECTS_DIR:
-        return RedirectResponse("/?error=Configure+GNS3_PROJECTS_DIR+before+creating+a+lab+from+a+backup", status_code=303)
-    active_states = {"preparing", "importing"}
-    if any(job.get("status") in active_states for job in app.state.import_jobs.values()):
-        return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303)
+        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303), False
+    if import_running():
+        return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303), False
+    prune_jobs(app.state.import_jobs)
     job_id = str(uuid.uuid4())
     job = {
-        "source_project_id": project_id,
-        "snapshot_id": snapshot_id,
-        "new_project_id": str(uuid.uuid4()),
-        "new_name": new_name,
-        "actor": user,
-        "audit_actor": audit_actor(request),
-        "status": "preparing",
-        "progress_percent": 0,
-        "message": "Import queued…",
-        "project_id": None,
+        "source_project_id": "", "snapshot_id": "", **source,
+        "new_project_id": str(uuid.uuid4()), "new_name": new_name,
+        "actor": current_user(request), "audit_actor": audit_actor(request),
+        "status": "preparing", "progress_percent": 0, "message": message, "project_id": None,
     }
     app.state.import_jobs[job_id] = job
     asyncio.create_task(run_snapshot_import_job(job))
-    return RedirectResponse(f"/?import_job={job_id}", status_code=303)
+    return RedirectResponse(f"/?import_job={job_id}", status_code=303), True
+
+
+def start_snapshot_import(request: Request, project_id: str, snapshot_id: str, name: str) -> RedirectResponse:
+    """Queue a distinct stopped lab from a source project's native snapshot."""
+    require_project_access(request, project_id)
+    if not GNS3_PROJECTS_DIR:
+        return RedirectResponse("/?error=Configure+GNS3_PROJECTS_DIR+before+creating+a+lab+from+a+backup", status_code=303)
+    return start_import(request, name, "Import queued…", source_project_id=project_id, snapshot_id=snapshot_id)[0]
 
 
 @app.post("/backup-imports")
 async def create_lab_from_backup(request: Request, source_project_id: str = Form(...), snapshot_id: str = Form(...), name: str = Form(...)):
-    require_permission(request, "labs.create")
     """Create a new lab from a selected backup on the dashboard."""
-    return await queue_snapshot_import(request, source_project_id, snapshot_id, name)
+    require_permission(request, "labs.create")
+    return start_snapshot_import(request, source_project_id, snapshot_id, name)
 
 
 @app.post("/shared-backup-imports")
@@ -2311,24 +2294,17 @@ async def create_lab_from_shared_backup(request: Request, source_project_id: str
     user = current_user(request)
     if not has_admin_scope(request) and not any(item["project_id"] == source_project_id and item["snapshot_id"] == snapshot_id for item in backup_shares_for(user)):
         raise HTTPException(404, "Shared backup not found.")
-    new_name = name.strip()
-    if not new_name or len(new_name) > 80:
-        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
     if not GNS3_PROJECTS_DIR:
         return RedirectResponse("/?error=Configure+GNS3_PROJECTS_DIR+before+creating+a+lab+from+a+backup", status_code=303)
-    if any(job.get("status") in {"preparing", "importing"} for job in app.state.import_jobs.values()):
-        return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303)
-    job_id = str(uuid.uuid4())
-    app.state.import_jobs[job_id] = {"source_project_id":source_project_id, "snapshot_id":snapshot_id, "new_project_id":str(uuid.uuid4()), "new_name":new_name, "actor":user, "audit_actor":audit_actor(request), "consume_backup_share":True, "status":"preparing", "progress_percent":0, "message":"Shared backup queued for import…", "project_id":None}
-    asyncio.create_task(run_snapshot_import_job(app.state.import_jobs[job_id]))
-    audit(audit_actor(request), "create_lab_from_shared_backup", source_project_id, {"snapshot_id": snapshot_id, "new_name": new_name})
-    return RedirectResponse(f"/?import_job={job_id}", status_code=303)
+    response, queued = start_import(request, name, "Shared backup queued for import…", source_project_id=source_project_id, snapshot_id=snapshot_id, consume_backup_share=True)
+    if queued:
+        audit(audit_actor(request), "create_lab_from_shared_backup", source_project_id, {"snapshot_id": snapshot_id, "new_name": name.strip()})
+    return response
 
 
 @app.post("/template-imports")
 async def create_lab_from_template(request: Request, template_id: str = Form(...), name: str = Form(...)):
     require_permission(request, "labs.create")
-    user = current_user(request)
     template = template_record(template_id)
     if not template or template.get("approval_status") != "approved":
         raise HTTPException(404, "Lab template not found.")
@@ -2337,70 +2313,89 @@ async def create_lab_from_template(request: Request, template_id: str = Form(...
         archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
     except (OSError, ValueError):
         return RedirectResponse("/?error=Template+archive+is+not+available", status_code=303)
-    new_name = name.strip()
-    if not new_name or len(new_name) > 80:
-        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
-    if any(job.get("status") in {"preparing", "importing"} for job in app.state.import_jobs.values()):
-        return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303)
-    job_id = str(uuid.uuid4())
-    app.state.import_jobs[job_id] = {"source_project_id":"", "snapshot_id":"", "template_path":str(archive_path), "template_id":template_id, "new_project_id":str(uuid.uuid4()), "new_name":new_name, "actor":user, "audit_actor":audit_actor(request), "status":"preparing", "progress_percent":0, "message":"Lab template queued for import…", "project_id":None}
-    asyncio.create_task(run_snapshot_import_job(app.state.import_jobs[job_id]))
-    audit(audit_actor(request), "create_lab_from_template", template_id, {"new_name": new_name})
-    return RedirectResponse(f"/?import_job={job_id}", status_code=303)
+    response, queued = start_import(request, name, "Lab template queued for import…", template_path=str(archive_path), template_id=template_id)
+    if queued:
+        audit(audit_actor(request), "create_lab_from_template", template_id, {"new_name": name.strip()})
+    return response
+
+
+def retained_backup_record(request: Request, backup_id: str) -> dict[str, Any] | None:
+    """A retained backup the effective user owns, or any one for a Lab Manager."""
+    owner = None if has_admin_scope(request) else current_user(request)
+    return next((item for item in retained_backups_for(owner) if item["backup_id"] == backup_id), None)
 
 
 @app.post("/retained-backup-imports")
 async def create_lab_from_retained_backup(request: Request, backup_id: str = Form(...), name: str = Form(...)):
     require_permission(request, "labs.create")
-    user = current_user(request)
-    record = next((item for item in retained_backups_for(None if is_admin(request) else user) if item["backup_id"] == backup_id), None)
+    record = retained_backup_record(request, backup_id)
     if not record or not Path(record["archive_path"]).is_file():
         return RedirectResponse("/?error=Retained+backup+not+found", status_code=303)
-    if not name.strip() or len(name.strip()) > 80:
-        return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
-    job_id = str(uuid.uuid4())
-    app.state.import_jobs[job_id] = {"source_project_id":"", "snapshot_id":"", "retained_path":record["archive_path"], "new_project_id":str(uuid.uuid4()), "new_name":name.strip(), "actor":user, "audit_actor":audit_actor(request), "status":"preparing", "progress_percent":0, "message":"Retained backup queued for import…", "project_id":None}
-    asyncio.create_task(run_snapshot_import_job(app.state.import_jobs[job_id]))
-    return RedirectResponse(f"/?import_job={job_id}", status_code=303)
+    return start_import(request, name, "Retained backup queued for import…", retained_path=record["archive_path"])[0]
+
+
+@app.post("/retained-backups/delete")
+async def delete_retained_backup(request: Request, backup_id: str = Form(...)):
+    """Free a retained-backup slot: remove the archive file and its record."""
+    record = retained_backup_record(request, backup_id)
+    if not record:
+        return RedirectResponse("/labs/new?error=Retained+backup+not+found", status_code=303)
+    archive = Path(record["archive_path"])
+    try:
+        archive.resolve(strict=True).relative_to(RETAINED_BACKUP_DIR.resolve(strict=True))
+        archive.unlink()
+    except FileNotFoundError:
+        pass  # Already gone from disk; still free the slot.
+    except (OSError, ValueError):
+        portal_logger.exception("retained_backup_delete_failed backup_id=%s", backup_id)
+        return RedirectResponse("/labs/new?error=The+retained+backup+file+could+not+be+deleted", status_code=303)
+    with db.connect() as connection:
+        connection.execute("DELETE FROM retained_backups WHERE backup_id=?", (backup_id,))
+    audit(audit_actor(request), "delete_retained_backup", record["source_project_id"], {"backup_id": backup_id, "owner": record["owner"], "backup_name": record["backup_name"]})
+    return RedirectResponse("/labs/new?message=Retained+backup+deleted", status_code=303)
 
 
 @app.post("/backup-uploads")
 async def upload_backup_as_lab(request: Request, name: str = Form(...), backup_file: UploadFile = File(...)):
-    require_permission(request, "labs.create")
     """Accept a portable/native backup and queue a new powered-off lab import."""
-    user = current_user(request)
+    require_permission(request, "labs.create")
     new_name = name.strip()
     suffix = Path(backup_file.filename or "").suffix.lower()
     if not new_name or len(new_name) > 80:
         return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
     if suffix not in {".gns3snapshot", ".gns3project"}:
         return RedirectResponse("/?error=Upload+a+.gns3snapshot+or+.gns3project+backup+file", status_code=303)
-    if any(job.get("status") in {"preparing", "importing"} for job in app.state.import_jobs.values()):
+    if import_running():
         return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303)
     upload_path = UPLOAD_DIR / f"{uuid.uuid4()}{suffix}"
+    written = 0
     try:
         with upload_path.open("wb") as destination:
             while chunk := await backup_file.read(1024 * 1024):
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise ValueError("upload too large")
                 destination.write(chunk)
-    except OSError:
+    except (OSError, ValueError) as exc:
         upload_path.unlink(missing_ok=True)
+        if isinstance(exc, ValueError):
+            return RedirectResponse(f"/?error={quote_plus(f'Backup files are limited to {format_storage_size(MAX_UPLOAD_BYTES)}.')}", status_code=303)
         return RedirectResponse("/?error=The+portal+could+not+store+the+uploaded+backup", status_code=303)
     finally:
         await backup_file.close()
-    job_id = str(uuid.uuid4())
-    job = {"source_project_id": "", "snapshot_id": "", "upload_path": str(upload_path), "new_project_id": str(uuid.uuid4()), "new_name": new_name, "actor": user, "audit_actor": audit_actor(request), "status": "preparing", "progress_percent": 0, "message": "Uploaded backup queued for import…", "project_id": None}
-    app.state.import_jobs[job_id] = job
-    asyncio.create_task(run_snapshot_import_job(job))
+    response, queued = start_import(request, new_name, "Uploaded backup queued for import…", upload_path=str(upload_path))
+    if not queued:
+        upload_path.unlink(missing_ok=True)  # Another import started while this file was uploading.
+        return response
     audit(audit_actor(request), "upload_backup", "portal", {"filename": Path(backup_file.filename or "").name, "new_name": new_name})
-    return RedirectResponse(f"/?import_job={job_id}", status_code=303)
+    return response
 
 
 @app.post("/projects/{project_id}/snapshots/{snapshot_id}/clone")
 async def clone_snapshot_as_lab(request: Request, project_id: str, snapshot_id: str, name: str = Form(...)):
-    require_permission(request, "labs.create")
     """Legacy endpoint retained for existing links; it returns to the dashboard."""
-    require_project_access(request, project_id)
-    return await queue_snapshot_import(request, project_id, snapshot_id, name)
+    require_permission(request, "labs.create")
+    return start_snapshot_import(request, project_id, snapshot_id, name)
 
 
 @app.get("/projects/{project_id}/import-jobs/{job_id}")
@@ -2426,7 +2421,6 @@ async def dashboard_import_job_status(request: Request, job_id: str):
 @app.post("/projects/{project_id}/rename")
 async def rename_project(request: Request, project_id: str, name: str = Form(...), return_to: str = Form("")):
     require_permission(request, "labs.edit")
-    user = current_user(request)
     require_project_access(request, project_id)
     new_name = name.strip()
     if not new_name or len(new_name) > 80:
@@ -2448,8 +2442,8 @@ async def restore_snapshot(request: Request, project_id: str, snapshot_id: str):
     require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     require_lab_owner(request, project_id)
-    user = current_user(request)
-    require_project_access(request, project_id)
+    if backup_is_active(project_id):
+        return RedirectResponse(f"/projects/{project_id}?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish", status_code=303)
     try:
         await ensure_project_open(project_id)
         await gns3("POST", f"/v2/projects/{project_id}/snapshots/{snapshot_id}/restore", json={})
@@ -2464,8 +2458,8 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
     require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     require_lab_owner(request, project_id)
-    user = current_user(request)
-    require_project_access(request, project_id)
+    if backup_is_active(project_id):
+        return RedirectResponse(f"/projects/{project_id}?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish", status_code=303)
     try:
         await ensure_project_open(project_id)
         await gns3("DELETE", f"/v2/projects/{project_id}/snapshots/{snapshot_id}")
@@ -2479,11 +2473,12 @@ async def delete_snapshot(request: Request, project_id: str, snapshot_id: str):
 
 @app.post("/projects/{project_id}/snapshots/delete")
 async def delete_selected_snapshots(request: Request, project_id: str, snapshot_ids: list[str] = Form(...)):
+    """Permanently remove selected completed backups after browser confirmation."""
     require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     require_lab_owner(request, project_id)
-    """Permanently remove selected completed backups after browser confirmation."""
-    require_project_access(request, project_id)
+    if backup_is_active(project_id):
+        return RedirectResponse(f"/projects/{project_id}?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish", status_code=303)
     selected_ids = {snapshot_id for snapshot_id in snapshot_ids if snapshot_id}
     if not selected_ids:
         return RedirectResponse(f"/projects/{project_id}?error=Select+at+least+one+backup", status_code=303)
@@ -2518,14 +2513,14 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
     require_permission(request, "labs.edit")
     require_project_access(request, project_id)
     require_lab_owner(request, project_id)
+    if backup_is_active(project_id):
+        return RedirectResponse(f"/projects/{project_id}?error=A+backup+is+running+for+this+lab.+Wait+for+it+to+finish", status_code=303)
     user = current_user(request)
-    require_project_access(request, project_id)
-    if not can_manage_lab_sharing(request, project_id):
-        raise HTTPException(403, "Only the lab owner or an Administrator can delete this lab.")
     project = await gns3("GET", f"/v2/projects/{project_id}")
     if confirmation.strip() != project.get("name"):
         return RedirectResponse(f"/projects/{project_id}?error=Lab+name+did+not+match", status_code=303)
     retained = 0
+    copies: list[tuple[str, dict[str, Any], Path]] = []
     if retained_snapshot_ids:
         if not GNS3_PROJECTS_DIR:
             return RedirectResponse(f"/projects/{project_id}?error=Configure+GNS3_PROJECTS_DIR+before+keeping+backups", status_code=303)
@@ -2537,19 +2532,38 @@ async def delete_project(request: Request, project_id: str, confirmation: str = 
         available = retained_backup_limit(user) - retained_backup_count(user)
         if len(selected_snapshots) > available:
             return RedirectResponse(f"/projects/{project_id}?error={quote_plus(f'You can retain only {max(available, 0)} more backup(s). Your limit is {retained_backup_limit(user)}.')}", status_code=303)
+        # Find every file before copying any, then record all copies together, so a
+        # failure leaves no half-kept backups and the lab untouched.
+        sources = [(snapshot, local_snapshot_file(project, snapshot)) for snapshot in selected_snapshots]
+        if not all(source for _, source in sources):
+            return RedirectResponse(f"/projects/{project_id}?error=One+or+more+native+backup+files+could+not+be+found", status_code=303)
         target_dir = RETAINED_BACKUP_DIR / project_id
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for snapshot in selected_snapshots:
-            source = local_snapshot_file(project, snapshot)
-            if not source:
-                return RedirectResponse(f"/projects/{project_id}?error=One+or+more+native+backup+files+could+not+be+found", status_code=303)
-            backup_id = str(uuid.uuid4())
-            destination = target_dir / f"{backup_id}.gns3snapshot"
-            await asyncio.to_thread(shutil.copy2, source, destination)
-            with db.connect() as connection:
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for snapshot, source in sources:
+                backup_id = str(uuid.uuid4())
+                destination = target_dir / f"{backup_id}.gns3snapshot"
+                copies.append((backup_id, snapshot, destination))
+                await asyncio.to_thread(shutil.copy2, source, destination)
+        except OSError:
+            portal_logger.exception("retain_backups_copy_failed project_id=%s", project_id)
+            for _, _, destination in copies:
+                destination.unlink(missing_ok=True)
+            return RedirectResponse(f"/projects/{project_id}?error=The+backups+could+not+be+copied+(is+the+disk+full%3F).+The+lab+was+not+deleted", status_code=303)
+        with db.connect() as connection:
+            for backup_id, snapshot, destination in copies:
                 connection.execute("INSERT INTO retained_backups(backup_id,owner,source_project_id,source_lab_name,backup_name,archive_path,size_bytes,retained_at) VALUES(?,?,?,?,?,?,?,?)", (backup_id, user, project_id, str(project.get("name", "Lab")), str(snapshot.get("name", "Unnamed backup")), str(destination), destination.stat().st_size, datetime.now(timezone.utc).isoformat()))
-            retained += 1
-    await gns3("DELETE", f"/v2/projects/{project_id}")
+        retained = len(copies)
+    try:
+        await gns3("DELETE", f"/v2/projects/{project_id}")
+    except HTTPException as exc:
+        # The lab still exists: undo the kept copies so a retry does not count them twice.
+        with db.connect() as connection:
+            for backup_id, _, _ in copies:
+                connection.execute("DELETE FROM retained_backups WHERE backup_id=?", (backup_id,))
+        for _, _, destination in copies:
+            destination.unlink(missing_ok=True)
+        return RedirectResponse(f"/projects/{project_id}?error={quote_plus(f'GNS3 did not delete the lab: {exc.detail}')}", status_code=303)
     with db.connect() as connection:
         connection.execute("DELETE FROM lab_owners WHERE project_id=?", (project_id,))
         connection.execute("DELETE FROM lab_shares WHERE project_id=?", (project_id,))

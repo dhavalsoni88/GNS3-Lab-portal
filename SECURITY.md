@@ -35,5 +35,6 @@ for a fix before any disclosure.
   `.env` readable only by root and the service group.
 - **Keep a break-glass account.** Keep at least one local Platform Admin with
   a strong password, stored offline.
-- **Prefer MariaDB in production.** Use it for append-only audit logging, and
-  forward `server_audit.log` to your SIEM.
+- **Forward the database audit log.** v9.0 runs on MariaDB only; forward
+  `/var/log/mysql/server_audit.log` to your SIEM and give reviewers the
+  read-only `gns3_portal_auditor` account.

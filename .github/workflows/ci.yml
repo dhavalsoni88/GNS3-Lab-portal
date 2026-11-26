@@ -10,12 +10,8 @@ permissions:
 
 jobs:
   test:
-    name: Tests (${{ matrix.database }})
+    name: Tests (MariaDB)
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        database: [sqlite, mariadb]
     services:
       mariadb:
         image: mariadb:10.11
@@ -41,14 +37,9 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q app.py portal_db.py portal_auth.py scripts tests
       - name: Check shell scripts
-        run: bash -n scripts/setup-mariadb.sh && bash -n scripts/migrate-snapshots-to-hdd-store.sh
-      - name: Run tests on SQLite
-        if: matrix.database == 'sqlite'
-        run: python -m pytest -q
-      - name: Run tests on MariaDB
-        if: matrix.database == 'mariadb'
+        run: bash -n scripts/setup-mariadb.sh && bash -n scripts/migrate-snapshots-to-hdd-store.sh && bash -n scripts/upgrade.sh
+      - name: Run tests
         env:
-          PORTAL_TEST_MARIADB: "1"
           PORTAL_DB_HOST: 127.0.0.1
           PORTAL_DB_USER: root
           PORTAL_DB_PASSWORD: ci-root-password

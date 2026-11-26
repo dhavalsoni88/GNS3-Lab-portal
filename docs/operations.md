@@ -32,8 +32,8 @@ Every portal action is recorded with the user, target, source IP, browser,
 request ID and result. Failed sign-ins are recorded with a reason, never the
 password. People with the Platform Admin or Auditor role can read it under
 **Audit log**. Everyone else sees their own actions under **My activity**.
-On MariaDB the audit records cannot be changed or deleted; see
-[database.md](database.md).
+The audit records cannot be changed or deleted, even by a database
+administrator, without leaving a trace; see [database.md](database.md).
 
 ## Server status
 
@@ -59,6 +59,9 @@ same host.
 - **Keep off-server copies.** Native snapshots live on the GNS3 server. For
   recovery from losing that server, export labs or copy the snapshot and
   template folders to separate storage on a schedule.
+- **Run one portal process.** Sessions, backup and import progress, SSO
+  requests and failed sign-in counts are kept in the service's memory. Do not
+  add `--workers` to the service file: users would be signed out at random.
 - **Avoid restarts during long jobs.** Do not restart the portal while a
   backup or a lab import is running; both run inside the service. Only one
   import runs at a time, so they don't compete for disk and controller I/O.
@@ -96,6 +99,23 @@ snapshot folders, as described in [storage.md](storage.md).
 Use **Test the connection** on the provider's page. Certificate errors mean
 the CA is missing or the URL's host name does not match the domain
 controller's certificate. Details are in `portal.log`.
+
+### "Too many failed sign-ins"
+
+After five failed sign-ins for one name from one address, the portal refuses
+that name from that address for 15 minutes. Each attempt is in the audit log
+with the reason `locked`. The lock clears itself. Restarting the portal also
+clears every lock, but it signs everyone out too.
+
+### The portal will not start
+
+`journalctl -u gns3-lab-portal -n 50` names the cause. The portal stops on
+purpose when:
+
+- `PORTAL_SECRET_KEY` is a placeholder or shorter than 32 characters;
+- `PORTAL_DB_BACKEND` is not `mariadb`, or MariaDB migrations are pending;
+- MariaDB holds no users while an old SQLite `audit.db` exists. Finish the
+  [SQLite move](upgrading.md#moving-from-sqlite-to-mariadb) first.
 
 ### Memory shows a percentage only
 

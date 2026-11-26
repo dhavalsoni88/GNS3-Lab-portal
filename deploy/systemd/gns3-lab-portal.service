@@ -7,7 +7,10 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/gns3-lab-portal
 EnvironmentFile=/opt/gns3-lab-portal/.env
+# Keep one worker: sessions, job progress and sign-in limits are held in process memory.
 ExecStart=/opt/gns3-lab-portal/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8088
+# Uploads are buffered to TMPDIR before the portal copies them; keep it off the root disk.
+Environment=TMPDIR=/opt/gns3-lab-portal/data/uploads
 Restart=always
 RestartSec=3
 # Defensive ceiling. The portal itself uses a bounded HTTP connection pool.

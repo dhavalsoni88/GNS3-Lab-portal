@@ -8,7 +8,7 @@ v8.6; see the [changelog](../CHANGELOG.md) for shipped changes.
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | SQLite/MariaDB database layer, versioned migrations, append-only audit and change history, MariaDB server audit, Argon2id, verified SQLite-to-MariaDB migration | Done |
+| 1 | MariaDB database layer (SQLite retired in v9.0), versioned migrations, append-only audit and change history, MariaDB server audit, Argon2id, verified SQLite-to-MariaDB migration | Done |
 | UI | Console redesign: sidebar navigation, labs list with status and filters, tabbed lab page, phone layouts, dark mode | Done |
 | 2 | Seven roles enforced on every action; Active Directory over LDAPS with group-to-role mapping; SAML 2.0 SSO (Entra ID, Okta, ADFS); local break-glass administrator | Done |
 | 3 | Server registry; one installer script for single-server, controller, compute-join and single-to-multi conversion; lab placement across computes; SNMPv3 health | Next |
