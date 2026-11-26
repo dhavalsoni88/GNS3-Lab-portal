@@ -1,6 +1,40 @@
 # Upgrading
 
-## Routine update
+## The one-step upgrade
+
+On every existing server, still on SQLite or already on MariaDB, run:
+
+```bash
+sudo git -C /opt/gns3-lab-portal pull --ff-only
+sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
+```
+
+[`scripts/upgrade.sh`](../scripts/upgrade.sh) works out which kind of server
+it is on and then:
+
+1. backs up `.env` (and the installed service file) with a timestamp;
+2. replaces a placeholder or short `PORTAL_SECRET_KEY` with a random one;
+3. installs the Python requirements and prepares MariaDB with
+   `setup-mariadb.sh` (installs it if needed, applies migrations, refreshes
+   grants);
+4. stops the portal;
+5. **SQLite servers only:** copies every row to MariaDB and verifies it, then
+   switches `.env` to MariaDB. If the copy does not verify, it stops with
+   `.env` unchanged;
+6. installs the new service file and starts the portal, then checks that it
+   answers.
+
+It is safe to re-run. Once `.env` says MariaDB, it never copies from SQLite
+again, so rows deleted in MariaDB cannot come back. It prints each step, and
+on failure says what to do and how to go back.
+
+Before you run it on a SQLite server, read [What keeps the move safe](#what-keeps-the-move-safe)
+and, if you can, rehearse on a copy. If it replaced your secret key and you
+use Active Directory, re-enter the service-account password under
+**Administration › Identity**. The sections below describe the same steps
+by hand, for a remote MariaDB or a customised install.
+
+## Routine update (by hand)
 
 Back up first, and never replace `.env`: it holds your passwords, paths and
 settings.
@@ -68,7 +102,8 @@ Behaviour changes to tell users about:
 ## Moving from SQLite to MariaDB
 
 This applies to every v8.x install, and to v9 preview installs that ran on
-SQLite.
+SQLite. `scripts/upgrade.sh` does all of this in one go; the steps below are
+the manual equivalent and explain what it does.
 
 ### What keeps the move safe
 

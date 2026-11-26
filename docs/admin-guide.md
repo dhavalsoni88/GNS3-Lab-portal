@@ -90,10 +90,11 @@ Use **Lab Operator** for people who only start and stop labs, and
 | Daily | MariaDB dump, as in [database.md](database.md#backing-up-the-database), plus copies of the retained-backup and template folders. |
 | Weekly | Review the audit log for failed sign-ins and unexpected admin actions. Check free disk space. |
 | Monthly | Review who holds Platform Admin and Lab Manager. Disable unused accounts. Test restoring the MariaDB dump on a spare server. |
-| Each release | Follow [upgrading.md](upgrading.md). Do not restart during running backups or imports. |
+| Each release | `git pull`, then `sudo bash scripts/upgrade.sh` ([upgrading.md](upgrading.md)). Not while backups or imports are running. |
 
 ## Moving an old install to MariaDB
 
 Servers that ran a version before v9.0 keep their data in SQLite. v9.0 will
-not start until the data is moved. The step-by-step, reversible procedure is
-in [upgrading.md](upgrading.md#moving-from-sqlite-to-mariadb).
+not start until the data is moved. `scripts/upgrade.sh` moves it in one step;
+the manual, reversible procedure is in
+[upgrading.md](upgrading.md#moving-from-sqlite-to-mariadb).

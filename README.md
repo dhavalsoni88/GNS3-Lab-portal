@@ -75,6 +75,13 @@ proxy (an [Nginx example](deploy/nginx/gns3-lab-portal.conf) is included).
 The full walkthrough, including data directories and storage permissions, is
 in the [installation guide](docs/installation.md).
 
+To upgrade an existing server, including one still on SQLite:
+
+```bash
+sudo git -C /opt/gns3-lab-portal pull --ff-only
+sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
+```
+
 ## Documentation
 
 | Guide | Covers |

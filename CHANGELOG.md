@@ -18,6 +18,8 @@ In development; see the [roadmap](docs/roadmap.md).
   ([upgrading.md](docs/upgrading.md#moving-from-sqlite-to-mariadb)). The
   script now also copies roles, identity providers and group mappings from
   v9-preview SQLite installs.
+- Add `scripts/upgrade.sh`: after `git pull`, one command upgrades any
+  server, moving SQLite installs to MariaDB with a verified copy.
 - One database layer (`portal_db.py`).
 - Add versioned MariaDB migrations, `scripts/setup-mariadb.sh` (least-privilege
   accounts, server audit plugin), and a verified, re-runnable

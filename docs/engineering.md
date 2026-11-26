@@ -12,6 +12,7 @@ first. Code conventions and the pull request steps are in
 | `portal_auth.py` | `ROLES` and `PERMISSIONS`, `user_permissions` (cached per request), `LdapDirectory`, the SAML helpers, `SecretBox`. |
 | `portal_db.py` | `connect()` (commit or roll back, then close), `translate_for_mariadb`, migrations. Run `python3 portal_db.py status` or `python3 portal_db.py migrate`. |
 | `database/mariadb/NNN_*.sql` | The schema, applied in order. Never edit a released file. |
+| `scripts/upgrade.sh` | The one-step server upgrade. Change it whenever an upgrade needs a new manual step, so administrators never have to. |
 | `scripts/migrate-sqlite-to-mariadb.py` | One-way import of pre-v9.0 SQLite data. Keep it working: older installs still need it. |
 | `tests/` | `conftest.py` builds a fresh MariaDB database per run. `test_access.py` covers permissions and start-up checks, `test_identity.py` covers LDAP and SAML, and `test_database.py` covers audit and migration. |
 
