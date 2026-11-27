@@ -234,9 +234,9 @@ def test_stopping_a_closed_lab_never_opens_it(client):
         login(client, "owner1", "owner1-password-1")
         stop = client.post("/projects/lab-owned/stop", data={"return_to": "/projects/lab-owned"}, follow_redirects=False)
         assert "message=" in stop.headers["location"] and not any(path.endswith("/open") for _, path in calls)
-        # Starting still has to open it, and shows GNS3's own reason when that fails.
+        # Starting still opens it; the failure is reported without GNS3's own text (which can hold server paths).
         start = client.post("/projects/lab-owned/start", data={"return_to": "/projects/lab-owned"}, follow_redirects=False)
-        assert "winserver2019.qcow2+is+missing" in start.headers["location"]
+        assert "HTTP+409" in start.headers["location"] and "winserver2019" not in start.headers["location"]
         client.post("/logout")
     finally:
         portal.app.state.gns3_client = original
@@ -387,3 +387,42 @@ def test_template_is_copied_in_the_background_with_progress(client, tmp_path, mo
         client.post("/logout")
     finally:
         portal.app.state.gns3_client = original
+
+
+@pytest.mark.parametrize("project,expected", [
+    ({"status": "closed"}, (0, 0)), ({"status": "OPENED"}, (1, 0)),
+    ({"status": "closing"}, None), ({}, None), ({"status": 42}, None), ([], None), (None, None),
+])
+def test_stop_only_skips_an_explicitly_closed_project(monkeypatch, project, expected):
+    import asyncio
+    from fastapi import HTTPException
+    calls = []
+
+    async def fake_gns3(method, path, **kwargs):
+        calls.append((method, path))
+        if path.endswith("/nodes") and method == "GET":
+            return [{"node_id": "vm", "node_type": "qemu", "status": "started"}]
+        return project if method == "GET" else None
+
+    monkeypatch.setattr(portal, "gns3", fake_gns3)
+    if expected is None:
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(portal.set_lab_node_power("lab-1", "stop"))
+        assert refused.value.status_code == 502 and calls == [("GET", "/v2/projects/lab-1")]
+    else:
+        assert asyncio.run(portal.set_lab_node_power("lab-1", "stop")) == expected
+    assert ("POST", "/v2/projects/lab-1/open") not in calls
+
+
+def test_gns3_error_text_never_reaches_users():
+    import asyncio
+    from fastapi import HTTPException
+    body = {"message": "Cannot open /home/gns3/GNS3/projects/secret.gns3 (password example-secret)"}
+    original = getattr(portal.app.state, "gns3_client", None)
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(409, json=body)))
+    try:
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(portal.gns3("GET", "/v2/projects/lab-1"))
+    finally:
+        portal.app.state.gns3_client = original
+    assert refused.value.detail == "GNS3 refused the request (HTTP 409). An administrator can find details in gns3-api.log."

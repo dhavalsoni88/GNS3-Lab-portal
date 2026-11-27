@@ -34,9 +34,10 @@ are kept under **Upgrade notes**. For upgrading an installation, see
 - Stopping a lab whose GNS3 project is closed no longer opens it first. A
   closed project runs nothing, and opening it failed when a node's image was
   missing ("GNS3 refused the request (HTTP 409)").
-- Show GNS3's own short explanation (for example "The image x.qcow2 is
-  missing") instead of only an HTTP code; the full response stays in
-  `gns3-api.log`.
+- Stop treats only an explicitly closed project as already stopped; an
+  unexpected or malformed project status is refused without touching the lab.
+- GNS3 error details stay out of what users see (as since v9.0.0); the full
+  response is in `gns3-api.log` for administrators.
 
 ## v9.0.0 — 2026-11-26
 
