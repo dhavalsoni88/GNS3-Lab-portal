@@ -41,22 +41,38 @@ disk (`.qcow2`, standalone, OpenSSH started at boot with password login allowed,
 sudo such as `labadmin`). Give that user and its password on the build form. The file must be readable
 by the builder's user: `sudo chown gns3:gns3` it after copying it in as root.
 
-### Watching a build's screen in Cockpit
+### The VM's screen, and building by hand
 
-By default the build VM has no screen: the build page shows its text console. To see the VM's graphical
-console while it builds, run the setup once with `--cockpit`:
+Every build page shows the **VM's screen** while it runs, live in the browser, with keyboard and mouse:
+text consoles (Linux CLI) and desktops (GNOME, Windows) alike. Click the screen to type into it;
+**Ctrl+Alt+Del** sends that key combination (Windows sign-in) and **Full screen** enlarges it. The VM's
+screen listens only on 127.0.0.1 on the server; the portal relays it to signed-in appliance
+administrators of this site only, and only while that build runs.
 
-```bash
-sudo bash scripts/setup-builder.sh --cockpit
-```
+Two applications are for building by hand in that screen:
 
-It installs libvirt, passt, Cockpit and cockpit-machines, lets the build user use libvirt, and sets
-`PORTAL_BUILDER_LIBVIRT=true`. Each build VM then runs as a temporary libvirt VM named
-`gns3-build-<job>` (titled "GNS3 build: <appliance>"), removed when it powers off after sealing. Open
-`https://<server>:9090`, sign in with an account that can use sudo, turn on administrative access, and
-open **Virtual machines** › the build › **Console**. The build page links there. The VM's screen
-listens only on 127.0.0.1 (Cockpit shows it in the browser), and its network is the same private
-user-mode network as before, with SSH forwarded to 127.0.0.1. Open port 9090 if a firewall is on.
+| Application | Start from | How it finishes |
+|---|---|---|
+| **Manual: Linux** (Ubuntu desktop or server) | A baseline disk, or an installer ISO with an empty disk | **Seal and finish**: the builder logs in with the password given on the form (optional for manual builds) and seals Ubuntu as for any build. Or shut the VM down yourself; it is then published as it is |
+| **Manual: Windows** (client or server) | A Windows baseline disk, or an installer ISO with an empty disk | Run `C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown`. The build publishes when Windows shuts down; each clone runs Windows setup on first boot |
+
+Installer ISOs go in `/var/lib/gns3-lab-portal-builder/isos/` (readable by the build user) and appear
+under **Start from**. Windows VMs get hardware Windows has drivers for: a SATA disk, an e1000 network
+card, a USB tablet for the mouse and a local-time clock; the published appliance uses the same.
+Windows 11 needs TPM 2.0 and UEFI Secure Boot, which these VMs do not provide; Windows 10 and Windows
+Server install normally. Windows licensing applies to every clone. A manual build stays open for up to
+24 hours.
+
+Behind Nginx the screen needs websocket forwarding, which the Nginx files in this repository include.
+On a server set up before this, run `sudo bash scripts/setup-https.sh --fqdn <name>` again (it keeps the
+certificate) to update the Nginx site.
+
+### Cockpit (optional)
+
+`sudo bash scripts/setup-builder.sh --cockpit` also runs build VMs through libvirt, so they appear in
+Cockpit (`https://<server>:9090`, **Virtual machines**) as `gns3-build-<job>` with their screen there
+too. It installs libvirt, passt, Cockpit and cockpit-machines and sets `PORTAL_BUILDER_LIBVIRT=true`.
+The portal's own screen works with or without it.
 
 ## Applications (recipes)
 

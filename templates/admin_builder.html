@@ -21,7 +21,7 @@
       <div class="step-head"><span class="step-num">1</span><h2>Application</h2></div>
       <div class="recipes" role="radiogroup" aria-label="Application">
         {% for id, recipe in recipes.items() %}
-        <label class="option-card"><input type="radio" name="recipe" value="{{ id }}" {% if loop.first %}checked{% endif %} required data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}" data-min-ram="{{ recipe.min_ram }}" data-min-cpus="{{ recipe.min_cpus }}" data-label="{{ recipe.label }}" data-custom="{{ 'yes' if recipe.custom else '' }}"><span><strong>{{ recipe.label.split(' (')[0] }}</strong><small>{{ recipe.description }}</small><span class="needs"><span>{{ recipe.min_cpus }}+ CPU</span><span>{{ recipe.min_ram }}+ MiB</span><span>{{ recipe.min_free_gib }} GiB free</span>{% if recipe.cpu_flags %}<span>{{ recipe.cpu_flags | join(' ') }}</span>{% endif %}{% if recipe.requires_license %}<span>licence</span>{% endif %}</span></span></label>
+        <label class="option-card"><input type="radio" name="recipe" value="{{ id }}" {% if loop.first %}checked{% endif %} required data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}" data-min-ram="{{ recipe.min_ram }}" data-min-cpus="{{ recipe.min_cpus }}" data-label="{{ recipe.label }}" data-custom="{{ 'yes' if recipe.custom else '' }}" data-interactive="{{ 'yes' if recipe.interactive else '' }}" data-os="{{ recipe.os }}"><span><strong>{{ recipe.label.split(' (')[0] }}</strong><small>{{ recipe.description }}</small><span class="needs"><span>{{ recipe.min_cpus }}+ CPU</span><span>{{ recipe.min_ram }}+ MiB</span><span>{{ recipe.min_free_gib }} GiB free</span>{% if recipe.cpu_flags %}<span>{{ recipe.cpu_flags | join(' ') }}</span>{% endif %}{% if recipe.requires_license %}<span>licence</span>{% endif %}</span></span></label>
         {% endfor %}
       </div>
       {% for id, recipe in recipes.items() if recipe.requires_license %}
@@ -43,9 +43,12 @@
       <div class="field-grid">
         <label class="span-2">Appliance name<input name="name" required maxlength="64" placeholder="DVWA on Ubuntu" data-name></label>
         <label>Version<input name="version" maxlength="64" value="1" data-version></label>
-        <label>Ubuntu baseline<select name="baseline" required>{% for name in baselines %}<option>{{ name }}</option>{% endfor %}</select></label>
+        <label>Start from<select name="baseline" required>
+          {% if baselines %}<optgroup label="Baseline disk">{% for name in baselines %}<option>{{ name }}</option>{% endfor %}</optgroup>{% endif %}
+          {% if isos %}<optgroup label="Installer ISO (manual builds)">{% for name in isos %}<option value="iso:{{ name }}">{{ name }}</option>{% endfor %}</optgroup>{% endif %}
+        </select></label>
         <label>Login user<input name="login_user" value="labadmin" maxlength="32" autocomplete="off"></label>
-        <label>Password<input name="login_password" type="password" required maxlength="256" autocomplete="off"><span class="hint">Used once to log in. Not stored.</span></label>
+        <label>Password<input name="login_password" type="password" maxlength="256" autocomplete="off" data-password><span class="hint" data-password-hint>Used once to log in. Not stored.</span></label>
         <label>CPUs<input name="cpus" type="number" min="1" max="16" data-cpus></label>
         <label>Memory (MiB)<input name="ram" type="number" min="512" max="65536" data-ram></label>
         <label>Disk (GiB)<input name="disk_gb" type="number" min="8" max="512" data-disk><span class="hint">A larger baseline keeps its size.</span></label>
@@ -70,10 +73,10 @@
         <div><dt>Disk file</dt><dd class="mono" data-summary-image>—</dd></div>
         <div><dt>Resources</dt><dd data-summary-resources>—</dd></div>
         <div><dt>Appliance store</dt><dd class="mono" style="word-break:break-all">{{ store.path }}</dd><dd class="muted" style="font-weight:400">{% if store.exists %}{{ store.free_bytes | storage_size }} free{% else %}Folder not found{% endif %}</dd></div>
-        <div><dt>Baselines</dt><dd class="mono" style="word-break:break-all">{{ builder_dir }}/baselines</dd></div>
+        <div><dt>Baselines and ISOs</dt><dd class="mono" style="word-break:break-all">{{ builder_dir }}/baselines<br>{{ builder_dir }}/isos</dd></div>
       </dl>
-      {% if not baselines %}<p class="error" role="alert">No baseline disk found. Put a stopped Ubuntu server <code>.qcow2</code> (OpenSSH with password login, a user with sudo) in the baselines folder. On a new server run <code>sudo bash scripts/setup-builder.sh</code> first.</p>{% endif %}
-      <button class="primary big"{% if not baselines %} disabled{% endif %}>Start build</button>
+      {% if not baselines and not isos %}<p class="error" role="alert">No baseline disk or installer ISO found. Put a stopped Ubuntu server <code>.qcow2</code> (OpenSSH with password login, a user with sudo) in the baselines folder. On a new server run <code>sudo bash scripts/setup-builder.sh</code> first.</p>{% endif %}
+      <button class="primary big"{% if not baselines and not isos %} disabled{% endif %}>Start build</button>
       <p class="muted" style="margin:0">A build often takes 10 to 40 minutes. The script runs as root in a throw-away VM, never on this server.</p>
     </section>
   </aside>
@@ -143,6 +146,8 @@ q('[data-summary-resources]').textContent=`${q('input[name=cpus]').value||'?'} C
 function choose(){const r=radios.find(x=>x.checked);if(!r)return;
 form.querySelectorAll('[data-recipe-only]').forEach(el=>{const on=el.dataset.recipeOnly===r.value;el.hidden=!on;el.disabled=!on});
 q('input[name=cpus]').min=r.dataset.minCpus;q('input[name=ram]').min=r.dataset.minRam;
+const manual=r.dataset.interactive==='yes';q('[data-password]').required=!manual;
+q('[data-password-hint]').textContent=manual?(r.dataset.os==='windows'?'Not needed for Windows.':'Optional: lets the builder seal Linux for you.'):'Used once to log in. Not stored.';
 q('input[name=cpus]').value=r.dataset.cpus;q('input[name=ram]').value=r.dataset.ram;q('input[name=disk_gb]').value=r.dataset.disk;
 if(!q('[data-name]').dataset.touched)q('[data-name]').value=r.dataset.label.split(' (')[0];summary()}
 q('[data-name]').addEventListener('input',e=>{e.target.dataset.touched='1'});

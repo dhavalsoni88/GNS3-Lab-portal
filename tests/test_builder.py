@@ -177,10 +177,10 @@ def test_recipe_icon_is_attached_when_none_is_uploaded(client, base):
 # --- the builder service, run for real against stub tools ---------------------------------------
 
 STUBS = {
-    "qemu-img": 'echo "$*" >> "$STUB_QEMU_LOG"\ncase "$1" in info) echo "{\\"virtual-size\\": $(( ${STUB_DISK_GIB:-8} * 1073741824 ))}";; convert) for last; do :; done; src=""; for a in "$@"; do src="$prev"; prev="$a"; done; cp "$src" "$last";; esac\nexit 0\n',
+    "qemu-img": 'echo "$*" >> "$STUB_QEMU_LOG"\ncase "$1" in create) args=("$@"); : > "${args[-2]}";; info) echo "{\\"virtual-size\\": $(( ${STUB_DISK_GIB:-8} * 1073741824 ))}";; convert) for last; do :; done; src=""; for a in "$@"; do src="$prev"; prev="$a"; done; cp "$src" "$last";; esac\nexit 0\n',
     "ssh-keygen": 'for a in "$@"; do last="$a"; done; echo KEY > "$last"; echo "ssh-ed25519 AAAA gns3-lab-builder" > "$last.pub"\n',
     "xorriso": 'for a in "$@"; do if [ "$prev" = "-o" ]; then touch "$a"; fi; prev="$a"; done\n',
-    "qemu-system-x86_64": 'while [ ! -f "$STUB_OFF" ]; do sleep 0.1; done\n',
+    "qemu-system-x86_64": 'echo "$*" >> "$STUB_QEMU_LOG.vm"\nwhile [ ! -f "$STUB_OFF" ]; do sleep 0.1; done\n',
     "virsh": 'echo "$*" >> "$STUB_VIRSH_LOG"\ncase "$4" in create) cp "$5" "$STUB_VIRSH_LOG.xml";; domstate) [ -f "$STUB_OFF" ] && { echo "error: domain not found" >&2; exit 1; }; echo running;; destroy) touch "$STUB_OFF";; esac\n',
     "ssh": 'case "$*" in *"read -r p"*) IFS= read -r given; [ "$given" = "$STUB_PASSWORD" ] && [ "$SSH_ASKPASS_REQUIRE" = force ] && [ "$($SSH_ASKPASS)" = "$STUB_PASSWORD" ] && echo "Build access added." && exit 0; echo "Permission denied"; exit 255;; esac\nbody=$(cat); if [ -n "$body" ]; then n=$(ls "$STUB_STAGES" | wc -l); printf "%s" "$body" > "$STUB_STAGES/$n.sh"; fi\nif echo "$body" | grep -q gns3-firstboot; then echo GNS3-SEAL-COMPLETE; touch "$STUB_OFF"; fi\nif [ -n "$STUB_FAIL" ] && echo "$body" | grep -q "$STUB_FAIL"; then echo "stub failure"; exit 3; fi\nexit 0\n',
 }

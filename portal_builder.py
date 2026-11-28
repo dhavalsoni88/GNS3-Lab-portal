@@ -32,6 +32,7 @@ CPU_FLAG = re.compile(r"^[a-z0-9_]{1,32}$")
 SERVICE = re.compile(r"^[A-Za-z0-9@._-]{1,80}$")
 HOOKS = ("install-app.sh", "check-app.sh", "seal-app.sh")
 BASELINE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.qcow2$")
+ISO_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.iso$")
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_SCRIPT, MAX_ICON, MAX_LOG_CHUNK = 64 * 1024, 1024 * 1024, 64 * 1024
 MAX_RECIPE_ZIP, MAX_ZIP_MEMBERS, MAX_ZIP_UNPACKED = 2 * 1024 * 1024, 100, 4 * 1024 * 1024
@@ -40,6 +41,14 @@ FINISHED = frozenset({"succeeded", "failed", "cancelled"})
 
 def builder_dir() -> Path:
     return Path(os.getenv("PORTAL_BUILDER_DIR", "").strip() or DEFAULT_BUILDER_DIR).expanduser()
+
+
+def isos(base: Path) -> list[str]:
+    """Installer ISOs (Windows, Ubuntu desktop, ...) the administrator placed in <builder dir>/isos, for manual builds."""
+    try:
+        return sorted(item.name for item in (base / "isos").iterdir() if ISO_FILE.match(item.name) and item.is_file())
+    except OSError:
+        return []
 
 
 def baselines(base: Path) -> list[str]:
@@ -91,8 +100,11 @@ def recipe_settings(data: Any) -> dict[str, Any]:
         "min_free_gib": _whole(data, "min_free_gib", 4, 0, 1024),
         "requires_license": data.get("requires_license", False), "license_url": str(data.get("license_url") or ""),
         "custom": data.get("custom", False), "host_prefix": slug(str(data.get("host_prefix") or label))[:24],
+        "interactive": data.get("interactive", False), "os": data.get("os", "linux"),
     }
-    for key in ("requires_license", "custom"):
+    if settings["os"] not in ("linux", "windows"):
+        raise ValueError("os must be linux or windows.")
+    for key in ("requires_license", "custom", "interactive"):
         if not isinstance(settings[key], bool):
             raise ValueError(f"{key} must be true or false.")
     if settings["license_url"] and not settings["license_url"].startswith("https://"):
@@ -117,7 +129,7 @@ def recipe_settings(data: Any) -> dict[str, Any]:
 def _read_recipe(folder: Path, source: str) -> dict[str, Any]:
     settings = recipe_settings(json.loads((folder / "recipe.json").read_text()))
     hooks = {name: (folder / name).read_text() for name in HOOKS if (folder / name).is_file()}
-    if not settings["custom"] and set(hooks) != set(HOOKS):
+    if not settings["custom"] and not settings["interactive"] and set(hooks) != set(HOOKS):
         raise ValueError("A recipe needs install-app.sh, check-app.sh and seal-app.sh.")
     icon = folder / "icon.png"
     return {**settings, "id": folder.name, "source": source, "hooks": hooks, "icon": icon if icon.is_file() else None}
@@ -289,7 +301,7 @@ def _number(form: dict[str, str], key: str, label: str, default: int, low: int, 
     return value
 
 
-def make_job(form: dict[str, str], recipes: dict[str, dict[str, Any]], available: list[str], created_by: str) -> dict[str, Any]:
+def make_job(form: dict[str, str], recipes: dict[str, dict[str, Any]], available: list[str], created_by: str, installers: list[str] | tuple = ()) -> dict[str, Any]:
     """Validate the request form into a job. Every value that reaches a root shell in the VM is checked here."""
     recipe = recipes.get(str(form.get("recipe", "")))
     if not recipe:
@@ -299,7 +311,14 @@ def make_job(form: dict[str, str], recipes: dict[str, dict[str, Any]], available
         raise ValueError("Give the appliance a name of up to 64 letters, digits, spaces or . _ + ( ) -.")
     if not TITLE.match(version):
         raise ValueError("The version may use up to 64 letters, digits, spaces or . _ + ( ) -.")
-    if form.get("baseline") not in available:
+    source, iso = str(form.get("baseline", "")), ""
+    if source.startswith("iso:"):
+        iso, source = source[4:], ""
+        if iso not in installers:
+            raise ValueError("Choose one of the installer ISOs listed.")
+        if not recipe.get("interactive"):
+            raise ValueError("Installing from an ISO is done by hand: choose Manual Linux or Manual Windows.")
+    elif source not in available:
         raise ValueError("Choose one of the baseline disks listed. Place the Ubuntu baseline in the baselines folder first.")
     login = str(form.get("login_user", "")).strip() or "labadmin"
     if not LOGIN.match(login):
@@ -321,7 +340,7 @@ def make_job(form: dict[str, str], recipes: dict[str, dict[str, Any]], available
         hooks = {"install-app.sh": "", "check-app.sh": scripts["check_script"], "seal-app.sh": scripts["seal_script"]}
     snapshot = {key: value for key, value in recipe.items() if key not in ("icon", "hooks")}
     return {
-        "name": name, "version": version, "baseline": form["baseline"], "recipe": recipe["id"], "login_user": login,
+        "name": name, "version": version, "baseline": source, "iso": iso, "recipe": recipe["id"], "login_user": login,
         "packages": packages, "custom_script": scripts["custom_script"], "notes": str(form.get("notes", "")).strip()[:2000], "created_by": created_by,
         "license_accepted": bool(recipe["requires_license"]),
         "cpus": _number(form, "cpus", "CPUs", recipe["cpus"], recipe["min_cpus"], 16),
@@ -377,9 +396,11 @@ class JobStore:
         folder = self.path(job_id)
         try:
             data = json.loads((folder / "status.json").read_text())
-            return {"state": str(data.get("state", "queued")), "message": str(data.get("message", "")), "percent": int(data.get("percent", 0))}
+            port = data.get("vnc_port")
+            return {"state": str(data.get("state", "queued")), "message": str(data.get("message", "")), "percent": int(data.get("percent", 0)),
+                    "vnc_port": port if type(port) is int and 5900 < port < 65536 else 0}
         except (OSError, ValueError):
-            return {"state": "queued", "message": "Waiting for the builder service.", "percent": 0}
+            return {"state": "queued", "message": "Waiting for the builder service.", "percent": 0, "vnc_port": 0}
 
     def all(self, limit: int = 30) -> list[dict[str, Any]]:
         found: list[dict[str, Any]] = []
@@ -412,15 +433,17 @@ class JobStore:
 
 def descriptor(job: dict[str, Any], recipe: dict[str, Any], image: str, md5: str, size: int) -> dict[str, Any]:
     """The .gns3a appliance file for a finished build (registry version 6, QEMU)."""
-    usage = "\n".join(part for part in (job.get("notes", ""), recipe.get("usage", ""), f"Built on {job['baseline']}. Sign in with the baseline's user ({job['login_user']}) and change its password.") if part)
+    origin = f"Installed from {job['iso']}." if job.get("iso") else f"Built on {job['baseline']}. Sign in with the baseline's user ({job['login_user']}) and change its password."
+    usage = "\n".join(part for part in (job.get("notes", ""), recipe.get("usage", ""), origin) if part)
+    windows = recipe.get("os") == "windows"
     return {
         "appliance_id": str(uuid.uuid4()), "name": job["name"], "category": "guest", "description": recipe.get("description") or job["name"],
         "vendor_name": "Local lab", "product_name": job["name"], "registry_version": 6, "status": "experimental",
         "maintainer": "Local lab", "maintainer_email": "local-lab@example.invalid", "usage": usage[:2000],
         "linked_clone": True, "first_port_name": "Ethernet0", "port_name_format": "Ethernet{0}",
-        "qemu": {"arch": "x86_64", "cpus": job["cpus"], "ram": job["ram"], "adapters": 1, "adapter_type": "virtio-net-pci",
-                 "hda_disk_interface": "virtio", "console_type": "vnc", "boot_priority": "c", "kvm": "require",
-                 "options": "-cpu host -machine pc -vga std", "on_close": "shutdown_signal"},
+        "qemu": {"arch": "x86_64", "cpus": job["cpus"], "ram": job["ram"], "adapters": 1, "adapter_type": "e1000" if windows else "virtio-net-pci",
+                 "hda_disk_interface": "sata" if windows else "virtio", "console_type": "vnc", "boot_priority": "c", "kvm": "require",
+                 "options": "-cpu host -machine q35 -vga std -rtc base=localtime" if windows else "-cpu host -machine pc -vga std", "on_close": "shutdown_signal"},
         "images": [{"filename": image, "version": job["version"], "md5sum": md5, "filesize": size}],
         "versions": [{"name": job["version"], "images": {"hda_disk_image": image}}],
     }

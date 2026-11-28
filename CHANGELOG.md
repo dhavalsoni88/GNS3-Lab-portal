@@ -61,9 +61,19 @@ Everything after v9.1.0 in one release. Upgrade with `git pull` followed by
   builder in a file only the two services can read, deleted when the build starts, and never logged.
 - **Robust on real baselines:** the disk is only ever grown (a larger baseline keeps its size), and
   every step waits for Ubuntu's automatic updates to release apt's locks.
-- **Watch the screen in Cockpit** (optional): with `setup-builder.sh --cockpit` each build VM runs as a
-  temporary libvirt VM, `gns3-build-<job>`, with its graphical console in Cockpit's Virtual machines
-  page. Its screen listens only on 127.0.0.1, and it is removed when it powers off.
+- **The VM's screen in the browser.** Every build page shows the build VM's screen live (noVNC, served
+  by the portal) with keyboard and mouse, Ctrl+Alt+Del and full screen: Linux text consoles and
+  desktops, and Windows. The screen listens only on 127.0.0.1; the portal relays it over a websocket to
+  signed-in appliance administrators of this site, and only while the build runs.
+- **Build by hand: Manual Linux and Manual Windows.** Start from a baseline disk or from an installer
+  ISO (in the builder's new `isos` folder) with an empty disk, set the VM up in its screen, then
+  **Seal and finish** (Linux, sealed over SSH with the optional password) or run Sysprep and shut down
+  (Windows); the build publishes when the VM is off. Windows VMs and appliances use SATA, e1000, a USB
+  tablet and a local-time clock.
+- **Cockpit** (optional): with `setup-builder.sh --cockpit` each build VM runs as a temporary libvirt
+  VM, `gns3-build-<job>`, that also appears in Cockpit's Virtual machines page.
+- The Nginx files forward websockets (needed for the screen); re-run `setup-https.sh` on an existing
+  server to update its site.
 
 ### New: interface
 

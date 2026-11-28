@@ -13,6 +13,18 @@
 
 <div class="split" data-build="{{ job.id }}" data-state="{{ job.state }}">
   <section class="stack">
+    {% if job.kind != 'analyze' %}
+    <section class="screen-card" data-screen-card {% if not (job.state in ('queued', 'running')) %}hidden{% endif %}>
+      <div class="screen-bar">
+        <span class="pill" data-screen-state>Screen: waiting for the VM</span>
+        <span class="spacer"></span>
+        <button type="button" data-cad title="Send Ctrl+Alt+Del (Windows sign-in)">Ctrl+Alt+Del</button>
+        <button type="button" data-full>Full screen</button>
+        {% if recipe.interactive and (recipe.os or 'linux') == 'linux' %}<form method="post" action="/admin/appliance-builder/{{ job.id }}/finish" onsubmit="return confirm('Seal Ubuntu and publish now? The VM shuts down.')"><button class="primary">Seal and finish</button></form>{% endif %}
+      </div>
+      <div class="screen" data-screen tabindex="0" aria-label="Build VM screen: click to type into the VM"></div>
+    </section>
+    {% endif %}
     <pre class="term" data-console tabindex="0" aria-label="Build console output"></pre>
   </section>
   <aside>
@@ -21,7 +33,7 @@
       <p class="muted" data-message>{{ job.message }}</p>
       <div class="progress"><div data-progress style="width:{{ job.percent }}%"></div></div>
       {% if cockpit_url %}<p class="muted" style="margin:0 0 12px">See the VM's screen in <a href="{{ cockpit_url }}" target="_blank" rel="noopener">Cockpit › Virtual machines</a> as <code>gns3-build-{{ job.id[:12] }}</code> while it runs.</p>{% endif %}
-      <ol class="steps" data-steps {% if job.kind == 'analyze' %}hidden{% endif %}>
+      <ol class="steps" data-steps {% if job.kind == 'analyze' or recipe.interactive %}hidden{% endif %}>
         <li data-at="2">Check the server can hold it</li>
         <li data-at="5">Clone the baseline</li>
         <li data-at="12">Prepare build access</li>
@@ -36,7 +48,24 @@
   </aside>
 </div>
 {% endblock %}
-{% block scripts %}<script>
+{% block scripts %}
+{% if job.kind != 'analyze' %}<script type="module">
+import RFB from "/static/novnc/core/rfb.js";
+const card = document.querySelector('[data-screen-card]'), box = document.querySelector('[data-screen]'), state = document.querySelector('[data-screen-state]');
+let rfb = null;
+function connect() {
+  if (rfb) return;
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/admin/appliance-builder/{{ job.id }}/screen`;
+  rfb = new RFB(box, url, { wsProtocols: ['binary'] });
+  rfb.scaleViewport = true; rfb.resizeSession = false; rfb.focusOnClick = true;
+  rfb.addEventListener('connect', () => { state.textContent = 'Screen: connected (click it to type)'; state.className = 'pill ok'; });
+  rfb.addEventListener('disconnect', () => { rfb = null; state.textContent = 'Screen: not connected'; state.className = 'pill off'; });
+}
+document.querySelector('[data-cad]').addEventListener('click', () => rfb && rfb.sendCtrlAltDel());
+document.querySelector('[data-full]').addEventListener('click', () => card.requestFullscreen && card.requestFullscreen());
+window.addEventListener('build-screen', event => { card.hidden = !event.detail && !['queued', 'running'].includes(document.querySelector('[data-build]').dataset.state); if (event.detail) connect(); });
+</script>{% endif %}
+<script>
 (()=>{const root=document.querySelector('[data-build]');if(!root)return;
 const out=root.querySelector('[data-console]'),label=root.querySelector('[data-state-label]'),pill=root.querySelector('[data-state-pill]'),message=root.querySelector('[data-message]'),bar=root.querySelector('[data-progress]'),steps=[...root.querySelectorAll('[data-steps] li')],
 cancel=document.querySelector('[data-cancel]'),publish=document.querySelector('[data-publish]');
@@ -47,7 +76,7 @@ steps.forEach((li,i)=>{li.className=state==='succeeded'||i<now?'done':i===now?(s
 paint(root.dataset.state,parseInt(bar.style.width,10)||0);
 async function poll(){try{const response=await fetch(`/admin/appliance-builder/${root.dataset.build}/log?offset=${offset}`,{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.detail);failures=0;
 if(data.text){const stick=out.scrollTop+out.clientHeight>=out.scrollHeight-20;out.textContent+=data.text;if(stick)out.scrollTop=out.scrollHeight}
-offset=data.offset;label.textContent=data.state;message.textContent=data.message;bar.style.width=data.percent+'%';paint(data.state,data.percent);
+offset=data.offset;root.dataset.state=data.state;window.dispatchEvent(new CustomEvent('build-screen',{detail:!!data.screen}));label.textContent=data.state;message.textContent=data.message;bar.style.width=data.percent+'%';paint(data.state,data.percent);
 const done=['succeeded','failed','cancelled'].includes(data.state);cancel.hidden=done;publish.hidden=data.state!=='succeeded';
 if(done&&!data.text)return}catch(error){if(++failures>5){message.textContent='Progress check interrupted. Refresh this page.';return}}
 setTimeout(poll,2000)}
