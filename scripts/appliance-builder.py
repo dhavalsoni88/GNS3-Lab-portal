@@ -305,7 +305,7 @@ class Analysis(Build):
     def build(self) -> None:
         self.status("running", "Looking at the source", 10)
         self.work.mkdir(parents=True, mode=0o700)
-        recipes = pb.load_recipes(BASE / "recipes")
+        recipes = pb.load_recipes(BASE / "recipes", include_hidden=True)
         builtin = {key for key, recipe in recipes.items() if recipe["source"] == "built-in"}
         try:
             result = builder_sources.draft(self.job["source"], self.work, self.say, set(recipes), builtin)

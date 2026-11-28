@@ -117,7 +117,8 @@ and running services. Use these to tighten the application's numbers.
   such as SSH, VNC and preview ports do not apply here.
 
 All three scripts are required. Imported recipes are stored in `<builder dir>/recipes`, can be read under
-**Scripts** before a build, and can be deleted. Built-in names cannot be replaced. Each build keeps a copy
+**Scripts** before a build, and can be deleted from the Applications list. Built-in applications cannot
+be deleted (they ship with the portal) but can be **hidden**, and shown again from the same list. Built-in names cannot be replaced. Each build keeps a copy
 of the scripts it ran, so editing or deleting a recipe later does not change a build already queued.
 
 ## Safety and limits
