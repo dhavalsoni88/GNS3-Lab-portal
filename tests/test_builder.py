@@ -397,3 +397,24 @@ def test_password_is_used_once_and_never_kept(service, monkeypatch):
     none = store.create(make(name="None"))
     module.Build(store.path(none)).execute()
     assert "No password" in store.status(none)["message"]
+
+
+def test_applications_can_be_hidden_shown_and_deleted_from_the_list(client, base):
+    page = client.get("/admin/appliance-builder").text
+    assert 'action="/admin/appliance-builder/recipes/dvwa/hide"' in page and "recipes/dvwa/delete" not in page   # built-ins hide, never delete
+    assert client.post("/admin/appliance-builder/recipes/dvwa/hide", follow_redirects=False).status_code == 303
+    assert "dvwa" not in pb.load_recipes(base / "recipes") and "dvwa" in pb.load_recipes(base / "recipes", include_hidden=True)
+    page = client.get("/admin/appliance-builder").text
+    assert 'value="dvwa"' not in page and 'recipes/dvwa/show' in page   # gone from the form, listed to show again
+    with pytest.raises(ValueError, match="already exists"):   # a hidden built-in still owns its id
+        pb.import_recipe(recipe_zip({"recipe.json": json.dumps({"id": "dvwa", "label": "X"}), "install-app.sh": "true", "check-app.sh": "true", "seal-app.sh": "true"}),
+                         base / "recipes", set(pb.load_recipes(base / "recipes", include_hidden=True)))
+    assert "Choose+an+application" in client.post("/admin/appliance-builder", data=form(recipe="dvwa", name="Hidden"), follow_redirects=False).headers["location"]
+    client.post("/admin/appliance-builder/recipes/dvwa/show")
+    assert "dvwa" in pb.load_recipes(base / "recipes")
+    assert client.post("/admin/appliance-builder/recipes/elk/hide").status_code == 404   # imported or unknown: no hiding
+    client.post("/admin/appliance-builder/recipes", files={"recipe_file": ("elk.zip", recipe_zip(GENERATOR), "application/zip")})
+    page = client.get("/admin/appliance-builder").text
+    assert 'action="/admin/appliance-builder/recipes/elk/delete"' in page and 'recipes/elk/hide' not in page
+    client.post("/admin/appliance-builder/recipes/elk/delete")
+    assert "elk" not in pb.load_recipes(base / "recipes")

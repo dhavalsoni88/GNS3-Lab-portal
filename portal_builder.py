@@ -123,16 +123,39 @@ def _read_recipe(folder: Path, source: str) -> dict[str, Any]:
     return {**settings, "id": folder.name, "source": source, "hooks": hooks, "icon": icon if icon.is_file() else None}
 
 
-def load_recipes(imported: Path | None = None) -> dict[str, dict[str, Any]]:
-    """Built-in recipes from the repository, then the ones imported in the portal. A built-in id always wins."""
+def hidden_builtins(imported: Path) -> set[str]:
+    """Built-in recipes an administrator hid; kept in <builder dir>/recipes/hidden.json."""
+    try:
+        return {str(item) for item in json.loads((imported / "hidden.json").read_text())}
+    except (OSError, ValueError, TypeError):
+        return set()
+
+
+def set_builtin_hidden(imported: Path, recipe_id: str, hidden: bool) -> None:
+    ids = hidden_builtins(imported)
+    ids = ids | {recipe_id} if hidden else ids - {recipe_id}
+    imported.mkdir(parents=True, exist_ok=True)
+    write_json(imported / "hidden.json", sorted(ids))
+
+
+def load_recipes(imported: Path | None = None, include_hidden: bool = False) -> dict[str, dict[str, Any]]:
+    """Built-in recipes from the repository, then the ones imported in the portal. A built-in id always wins.
+
+    Hidden built-ins are left out unless include_hidden: they still own their id, so an import cannot take it.
+    """
     recipes: dict[str, dict[str, Any]] = {}
-    for root, source in ((RECIPE_DIR, "built-in"), (imported if imported is not None else builder_dir() / "recipes", "imported")):
+    imported = imported if imported is not None else builder_dir() / "recipes"
+    for root, source in ((RECIPE_DIR, "built-in"), (imported, "imported")):
         for folder in sorted(root.iterdir()) if root.is_dir() else []:
             if RECIPE_ID.match(folder.name) and folder.name not in recipes:
                 try:
                     recipes[folder.name] = _read_recipe(folder, source)
                 except (OSError, ValueError):
                     continue   # a broken recipe is left out; import refuses to create one
+    if not include_hidden:
+        for recipe_id in hidden_builtins(imported):
+            if recipes.get(recipe_id, {}).get("source") == "built-in":
+                del recipes[recipe_id]
     return recipes
 
 

@@ -17,20 +17,21 @@
 
 <form class="split" method="post" action="/admin/appliance-builder" enctype="multipart/form-data" data-builder-form>
   <div class="stack">
-    <section class="card">
+    <section class="card form-stack">
       <div class="step-head"><span class="step-num">1</span><h2>Application</h2></div>
       <div class="recipes" role="radiogroup" aria-label="Application">
         {% for id, recipe in recipes.items() %}
-        <label class="option-card"><input type="radio" name="recipe" value="{{ id }}" {% if loop.first %}checked{% endif %} required data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}" data-min-ram="{{ recipe.min_ram }}" data-min-cpus="{{ recipe.min_cpus }}" data-label="{{ recipe.label }}" data-custom="{{ 'yes' if recipe.custom else '' }}"><span><strong>{{ recipe.label.split(' (')[0] }}</strong><small>{{ recipe.description }}</small><small class="mono">Needs {{ recipe.min_cpus }}+ CPU · {{ recipe.min_ram }}+ MiB · {{ recipe.min_free_gib }} GiB free{% if recipe.cpu_flags %} · {{ recipe.cpu_flags | join(' ') }}{% endif %}{% if recipe.requires_license %} · licence{% endif %}</small></span></label>
+        <label class="option-card"><input type="radio" name="recipe" value="{{ id }}" {% if loop.first %}checked{% endif %} required data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}" data-min-ram="{{ recipe.min_ram }}" data-min-cpus="{{ recipe.min_cpus }}" data-label="{{ recipe.label }}" data-custom="{{ 'yes' if recipe.custom else '' }}"><span><strong>{{ recipe.label.split(' (')[0] }}</strong><small>{{ recipe.description }}</small><span class="needs"><span>{{ recipe.min_cpus }}+ CPU</span><span>{{ recipe.min_ram }}+ MiB</span><span>{{ recipe.min_free_gib }} GiB free</span>{% if recipe.cpu_flags %}<span>{{ recipe.cpu_flags | join(' ') }}</span>{% endif %}{% if recipe.requires_license %}<span>licence</span>{% endif %}</span></span></label>
         {% endfor %}
       </div>
       {% for id, recipe in recipes.items() if recipe.requires_license %}
-      <fieldset class="form-stack" style="border:0;padding:16px 0 0;margin:0" data-recipe-only="{{ id }}" disabled hidden>
+      <fieldset class="form-stack subsection" data-recipe-only="{{ id }}" disabled hidden>
         <label class="inline-check"><input type="checkbox" name="accept_license" value="yes" required> I have read and accept the {% if recipe.license_url %}<a href="{{ recipe.license_url }}" target="_blank" rel="noopener">{{ recipe.label }} licence</a>{% else %}{{ recipe.label }} licence{% endif %}</label>
       </fieldset>
       {% endfor %}
       {% for id, recipe in recipes.items() if recipe.custom %}
-      <fieldset class="form-stack" style="border:0;padding:16px 0 0;margin:0" data-recipe-only="{{ id }}" disabled hidden>
+      <fieldset class="form-stack subsection" data-recipe-only="{{ id }}" disabled hidden>
+        <h3>Scripts for a custom appliance</h3>
         <label>Check script <span class="muted">(optional)</span><textarea name="check_script" rows="3" spellcheck="false" class="mono" placeholder="curl -fs http://127.0.0.1/ -o /dev/null"></textarea><span class="muted">Runs after the install and again before sealing. If it fails, nothing is published.</span></label>
         <label>Clean-up before sealing<textarea name="seal_script" rows="3" spellcheck="false" class="mono" required placeholder="true"></textarea><span class="muted">Remove anything that must differ per clone: generated IDs, keys, accounts, data. Write <code>true</code> if the software keeps none.</span></label>
       </fieldset>
@@ -39,30 +40,26 @@
 
     <section class="card form-stack">
       <div class="step-head"><span class="step-num">2</span><h2>Name and baseline</h2></div>
-      <div class="form-row">
-        <label>Appliance name<input name="name" required maxlength="64" placeholder="DVWA on Ubuntu" data-name></label>
+      <div class="field-grid">
+        <label class="span-2">Appliance name<input name="name" required maxlength="64" placeholder="DVWA on Ubuntu" data-name></label>
         <label>Version<input name="version" maxlength="64" value="1" data-version></label>
-      </div>
-      <div class="form-row">
         <label>Ubuntu baseline<select name="baseline" required>{% for name in baselines %}<option>{{ name }}</option>{% endfor %}</select></label>
-        <label>Baseline's login user<input name="login_user" value="labadmin" maxlength="32" autocomplete="off"></label>
-        <label>Its password<input name="login_password" type="password" required maxlength="256" autocomplete="off"><span class="muted">Used once to log in to the build VM. Not stored.</span></label>
-      </div>
-      <div class="form-row">
+        <label>Login user<input name="login_user" value="labadmin" maxlength="32" autocomplete="off"></label>
+        <label>Password<input name="login_password" type="password" required maxlength="256" autocomplete="off"><span class="hint">Used once to log in. Not stored.</span></label>
         <label>CPUs<input name="cpus" type="number" min="1" max="16" data-cpus></label>
         <label>Memory (MiB)<input name="ram" type="number" min="512" max="65536" data-ram></label>
-        <label>Disk (GiB)<input name="disk_gb" type="number" min="8" max="512" data-disk></label>
+        <label>Disk (GiB)<input name="disk_gb" type="number" min="8" max="512" data-disk><span class="hint">A larger baseline keeps its size.</span></label>
       </div>
     </section>
 
     <section class="card form-stack">
       <div class="step-head"><span class="step-num">3</span><h2>Customise <span class="muted">(optional)</span></h2></div>
-      <label>Extra Ubuntu packages<input name="packages" placeholder="nginx git" autocomplete="off"><span class="muted">Space or comma separated.</span></label>
-      <label>Your own setup script<textarea name="custom_script" rows="6" spellcheck="false" class="mono"></textarea><span class="muted">Runs as root in the VM after the application, with bash.</span></label>
-      <div class="form-row">
-        <label>Icon<input type="file" name="icon" accept="image/png"><span class="muted">PNG. The application's own icon is used if it has one.</span></label>
+      <div class="field-grid">
+        <label class="span-2">Extra Ubuntu packages<input name="packages" placeholder="nginx git" autocomplete="off"><span class="hint">Space or comma separated.</span></label>
+        <label>Icon<input type="file" name="icon" accept="image/png"><span class="hint">PNG. Default: the application's icon.</span></label>
+        <label class="span-3">Your own setup script<textarea name="custom_script" rows="5" spellcheck="false" class="mono"></textarea><span class="hint">Runs as root in the VM after the application, with bash.</span></label>
+        <label class="span-3">Notes for users<textarea name="notes" rows="3" maxlength="2000"></textarea><span class="hint">Shown under Usage in GNS3: default login, first steps.</span></label>
       </div>
-      <label>Notes for users<textarea name="notes" rows="3" maxlength="2000"></textarea><span class="muted">Shown under Usage in GNS3: default login, first steps.</span></label>
     </section>
   </div>
 
@@ -111,10 +108,17 @@
             <td class="primary-cell"><a class="cell-title" href="/admin/appliance-builder/recipes/{{ id }}">{{ recipe.label.split(' (')[0] }}</a><div class="cell-meta mono">{{ id }}</div></td>
             <td data-label="Needs">{{ recipe.min_cpus }}+ CPU · {{ recipe.min_ram }}+ MiB · {{ recipe.min_free_gib }} GiB{% if recipe.requires_license %} · licence{% endif %}</td>
             <td data-label="Source">{{ 'Built in' if recipe.source == 'built-in' else 'Imported' }}</td>
-            <td class="actions"><a class="button" href="/admin/appliance-builder/recipes/{{ id }}">Scripts</a></td>
+            <td class="actions"><div class="row-actions">
+              <a class="button" href="/admin/appliance-builder/recipes/{{ id }}">Scripts</a>
+              {% if recipe.source == 'imported' %}<form method="post" action="/admin/appliance-builder/recipes/{{ id }}/delete" onsubmit="return confirm('Delete {{ recipe.label }}? Appliances already built from it stay in the library.')"><button class="danger">Delete</button></form>
+              {% else %}<form method="post" action="/admin/appliance-builder/recipes/{{ id }}/hide"><button title="Remove it from this list and the build form. It can be shown again.">Hide</button></form>{% endif %}
+            </div></td>
           </tr>{% endfor %}
         </tbody>
       </table>
+      {% if hidden_recipes %}<div class="table-foot muted">Hidden:
+        {% for id, recipe in hidden_recipes.items() %}<form class="inline" method="post" action="/admin/appliance-builder/recipes/{{ id }}/show"><button class="link" title="Show it again">{{ recipe.label.split(' (')[0] }}</button></form>{% endfor %}
+      </div>{% endif %}
     </div>
     <aside>
       <section class="card form-stack">

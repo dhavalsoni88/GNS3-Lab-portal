@@ -2142,6 +2142,7 @@ async def builder_page(request: Request):
     appliance_admin(request)
     return templates.TemplateResponse(request, "admin_builder.html", {
         **base_context(request, "builder"), "recipes": builder.load_recipes(BUILDER_DIR / "recipes"), "baselines": builder.baselines(BUILDER_DIR),
+        "hidden_recipes": {key: value for key, value in builder.load_recipes(BUILDER_DIR / "recipes", include_hidden=True).items() if key in builder.hidden_builtins(BUILDER_DIR / "recipes")},
         "jobs": await asyncio.to_thread(builder_store().all), "builder_dir": str(BUILDER_DIR), "store": await asyncio.to_thread(appliance_store_info),
         "now": int(time.time()),
     })
@@ -2185,7 +2186,7 @@ async def builder_import_recipe(request: Request, recipe_file: UploadFile = File
     await recipe_file.close()
     folder = BUILDER_DIR / "recipes"
     try:
-        recipe_id = await asyncio.to_thread(builder.import_recipe, raw, folder, set(builder.load_recipes(folder)))
+        recipe_id = await asyncio.to_thread(builder.import_recipe, raw, folder, set(builder.load_recipes(folder, include_hidden=True)))
     except ValueError as exc:
         return builder_back(str(exc))
     except OSError:
@@ -2203,6 +2204,36 @@ async def builder_recipe_page(request: Request, recipe_id: str):
     if not recipe:
         raise HTTPException(404, "That application was not found.")
     return templates.TemplateResponse(request, "admin_builder_recipe.html", {**base_context(request, "builder"), "recipe": recipe})
+
+
+@app.post("/admin/appliance-builder/recipes/{recipe_id}/hide")
+async def builder_hide_recipe(request: Request, recipe_id: str):
+    """Built-in recipes live in the repository and cannot be deleted; they can be hidden from the builder."""
+    appliance_admin(request)
+    folder = BUILDER_DIR / "recipes"
+    recipe = builder.load_recipes(folder, include_hidden=True).get(recipe_id)
+    if not recipe or recipe["source"] != "built-in":
+        raise HTTPException(404, "Only built-in applications are hidden; delete imported ones instead.")
+    try:
+        await asyncio.to_thread(builder.set_builtin_hidden, folder, recipe_id, True)
+    except OSError:
+        return builder_back("The portal cannot write to the builder's recipes folder. Run scripts/setup-builder.sh on the server.")
+    audit(audit_actor(request), "builder_recipe_hidden", recipe_id, {})
+    return builder_back(f"{recipe['label']} is hidden. Show it again from the Applications list.", "message")
+
+
+@app.post("/admin/appliance-builder/recipes/{recipe_id}/show")
+async def builder_show_recipe(request: Request, recipe_id: str):
+    appliance_admin(request)
+    folder = BUILDER_DIR / "recipes"
+    if recipe_id not in builder.hidden_builtins(folder):
+        raise HTTPException(404, "That application is not hidden.")
+    try:
+        await asyncio.to_thread(builder.set_builtin_hidden, folder, recipe_id, False)
+    except OSError:
+        return builder_back("The portal cannot write to the builder's recipes folder. Run scripts/setup-builder.sh on the server.")
+    audit(audit_actor(request), "builder_recipe_shown", recipe_id, {})
+    return builder_back("Shown again.", "message")
 
 
 @app.post("/admin/appliance-builder/recipes/{recipe_id}/delete")
@@ -2273,7 +2304,7 @@ async def save_recipe_form(request: Request, recipe_id: str, replace: bool, back
         hooks = {name: values.get(name, "") for name in builder.HOOKS}
         if not hooks["seal-app.sh"].strip():
             raise ValueError("seal-app.sh cannot be empty. Write true if nothing differs between clones.")
-        if not replace and recipe_id in builder.load_recipes(folder):
+        if not replace and recipe_id in builder.load_recipes(folder, include_hidden=True):
             raise ValueError(f"An application called {recipe_id} already exists. Choose another id.")
         await asyncio.to_thread(builder.save_recipe, folder, recipe_id, settings, hooks, b"", replace)
     except ValueError as exc:

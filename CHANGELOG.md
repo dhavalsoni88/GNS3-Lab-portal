@@ -5,6 +5,19 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.4.4 — 2026-11-28
+
+### Changed
+
+- **Appliance builder layout.** The name, baseline, login and size fields sit on an aligned grid with
+  hints under their own field, so the password hint no longer pushes the row out of line. Application
+  cards list their requirements in short pieces that wrap between values. All three steps share one
+  spacing, the custom appliance's scripts sit in their own section, and the icon picker shares a row.
+- **Applications can be removed from the list.** Imported applications have **Delete** in the list
+  (appliances already built from them stay in the library). Built-in ones have **Hide**: they leave the
+  list and the build form, are listed under the table, and can be shown again. A hidden built-in keeps
+  its name, so an import cannot take it.
+
 ## v9.4.3 — 2026-11-28
 
 ### Fixes
