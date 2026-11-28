@@ -83,6 +83,7 @@ GNS3_ROOT = GNS3_PROJECTS_DIR.parent if GNS3_PROJECTS_DIR else Path("/home/gns3/
 GNS3_IMAGES_DIR = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or GNS3_ROOT / "images" / "QEMU").expanduser()
 APPLIANCE_SEARCH_DIRS = tuple(Path(item.strip()).expanduser() for item in os.getenv("PORTAL_APPLIANCE_SEARCH_DIRS", str(GNS3_ROOT / "images")).split(",") if item.strip())
 BUILDER_DIR = builder.builder_dir()
+BUILDER_LIBVIRT = os.getenv("PORTAL_BUILDER_LIBVIRT", "").strip().lower() in ("1", "true", "yes")   # build VMs visible in Cockpit
 TLS_DIR = Path(os.getenv("PORTAL_TLS_DIR", str(BASE_DIR / "data" / "tls"))).expanduser()
 # Written by the root helper that reloads Nginx (scripts/apply-tls.sh); the portal only reads it.
 TLS_STATUS_FILE = Path(os.getenv("PORTAL_TLS_STATUS_FILE", "/run/gns3-lab-portal-tls.status"))
@@ -2338,7 +2339,8 @@ async def builder_job_page(request: Request, job_id: str):
         return redirect_login()
     appliance_admin(request)
     job = builder_job(job_id)
-    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": job.get("recipe_snapshot") or {}})
+    cockpit = f"https://{request.url.hostname}:9090/machines" if BUILDER_LIBVIRT and job.get("kind") != "analyze" else ""
+    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": job.get("recipe_snapshot") or {}, "cockpit_url": cockpit})
 
 
 @app.get("/admin/appliance-builder/{job_id}/log")

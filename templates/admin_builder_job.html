@@ -20,6 +20,7 @@
       <h2><span class="pill" data-state-pill><span data-state-label>{{ job.state }}</span></span></h2>
       <p class="muted" data-message>{{ job.message }}</p>
       <div class="progress"><div data-progress style="width:{{ job.percent }}%"></div></div>
+      {% if cockpit_url %}<p class="muted" style="margin:0 0 12px">See the VM's screen in <a href="{{ cockpit_url }}" target="_blank" rel="noopener">Cockpit › Virtual machines</a> as <code>gns3-build-{{ job.id[:12] }}</code> while it runs.</p>{% endif %}
       <ol class="steps" data-steps {% if job.kind == 'analyze' %}hidden{% endif %}>
         <li data-at="2">Check the server can hold it</li>
         <li data-at="5">Clone the baseline</li>

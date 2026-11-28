@@ -41,6 +41,23 @@ disk (`.qcow2`, standalone, OpenSSH started at boot with password login allowed,
 sudo such as `labadmin`). Give that user and its password on the build form. The file must be readable
 by the builder's user: `sudo chown gns3:gns3` it after copying it in as root.
 
+### Watching a build's screen in Cockpit
+
+By default the build VM has no screen: the build page shows its text console. To see the VM's graphical
+console while it builds, run the setup once with `--cockpit`:
+
+```bash
+sudo bash scripts/setup-builder.sh --cockpit
+```
+
+It installs libvirt, passt, Cockpit and cockpit-machines, lets the build user use libvirt, and sets
+`PORTAL_BUILDER_LIBVIRT=true`. Each build VM then runs as a temporary libvirt VM named
+`gns3-build-<job>` (titled "GNS3 build: <appliance>"), removed when it powers off after sealing. Open
+`https://<server>:9090`, sign in with an account that can use sudo, turn on administrative access, and
+open **Virtual machines** › the build › **Console**. The build page links there. The VM's screen
+listens only on 127.0.0.1 (Cockpit shows it in the browser), and its network is the same private
+user-mode network as before, with SSH forwarded to 127.0.0.1. Open port 9090 if a firewall is on.
+
 ## Applications (recipes)
 
 Each application is a *recipe*: a folder with

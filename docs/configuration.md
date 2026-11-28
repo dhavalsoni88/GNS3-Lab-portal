@@ -28,6 +28,7 @@ loads them from `/opt/gns3-lab-portal/.env`; start from
 | `PORTAL_USERNAME`, `PORTAL_PASSWORD` | `portaladmin` / placeholder | First local Platform Admin, created only when the database is new. |
 | `PORTAL_SECRET_KEY` | placeholder | Signs session cookies and encrypts stored directory passwords. The portal **refuses to start** unless it is 32+ characters and not a shipped placeholder. Generate one with `openssl rand -hex 32` and keep it stable. |
 | `PORTAL_PUBLIC_URL` | empty | Public `https://` address of the portal. Required for SAML single sign-on. |
+| `PORTAL_BUILDER_LIBVIRT` | `false` | Run appliance build VMs through libvirt so they show in Cockpit with their screen. Set by `setup-builder.sh --cockpit`. |
 | `PORTAL_BUILDER_DIR` | `/var/lib/gns3-lab-portal-builder` | Job folder shared with the appliance builder service, and its `baselines` folder ([appliance-builder.md](appliance-builder.md)). |
 | `PORTAL_TLS_DIR` | `data/tls` | Folder for the HTTPS certificate and key that Nginx serves ([https.md](https.md)). |
 | `PORTAL_TLS_STATUS_FILE` | `/run/gns3-lab-portal-tls.status` | Where the root reload helper reports whether Nginx accepted a new certificate. |

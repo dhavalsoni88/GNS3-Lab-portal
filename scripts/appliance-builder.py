@@ -12,6 +12,7 @@ import secrets
 import json
 import os
 import shlex
+from xml.sax.saxutils import escape
 import shutil
 import signal
 import socket
@@ -26,6 +27,9 @@ import portal_builder as pb  # noqa: E402
 
 BASE = pb.builder_dir()
 IMAGES = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or "/home/gns3/GNS3/images/QEMU")
+# With libvirt the build VM appears in Cockpit's Virtual machines page with its graphical console (setup-builder.sh --cockpit).
+LIBVIRT = os.getenv("PORTAL_BUILDER_LIBVIRT", "").strip().lower() in ("1", "true", "yes")
+VIRSH = ["virsh", "-q", "-c", "qemu:///system"]
 SSH_WAIT, RECIPE_WAIT, SEAL_WAIT = 600, 3600, 300
 
 
@@ -52,6 +56,37 @@ class Cancelled(Exception):
     pass
 
 
+def domain_xml(name: str, title: str, ram: int, cpus: int, disk: Path, port: int) -> str:
+    """A transient libvirt VM equal to the plain QEMU one: same CPU, disk and user-mode network with SSH on 127.0.0.1:port,
+    plus a VNC screen on 127.0.0.1 that Cockpit shows in the browser. It disappears when it powers off."""
+    return f"""<domain type='kvm'>
+  <name>{name}</name>
+  <title>{escape(title)}</title>
+  <description>GNS3 Lab Portal appliance build. Removed automatically when it powers off.</description>
+  <memory unit='MiB'>{ram}</memory>
+  <vcpu>{cpus}</vcpu>
+  <os><type arch='x86_64' machine='pc'>hvm</type><boot dev='hd'/></os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <devices>
+    <disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='{escape(str(disk))}'/><target dev='vda' bus='virtio'/></disk>
+    <interface type='user'>
+      <backend type='passt'/>
+      <portForward proto='tcp' address='127.0.0.1'><range start='{port}' to='22'/></portForward>
+      <model type='virtio'/>
+    </interface>
+    <graphics type='vnc' autoport='yes' listen='127.0.0.1'><listen type='address' address='127.0.0.1'/></graphics>
+    <video><model type='virtio'/></video>
+    <input type='tablet' bus='usb'/>
+    <serial type='pty'/>
+    <console type='pty'/>
+  </devices>
+</domain>
+"""
+
+
 def ssh_banner(port: int) -> bool:
     """True once sshd in the VM answers (its greeting starts with SSH-)."""
     try:
@@ -72,6 +107,8 @@ def host_facts() -> tuple[int, int, set[str]]:
 
 def preflight(job: dict, recipe: dict) -> None:
     """Refuse a build this server cannot hold, before any disk is copied or VM started."""
+    if LIBVIRT and not shutil.which("virsh"):
+        raise RuntimeError("PORTAL_BUILDER_LIBVIRT is on but libvirt is not installed. Run sudo bash scripts/setup-builder.sh --cockpit.")
     cpus, memory, flags = host_facts()
     if job["cpus"] > cpus:
         raise RuntimeError(f"The build VM needs {job['cpus']} CPUs; this server has {cpus}.")
@@ -100,6 +137,7 @@ class Build:
             self.password = ""
         secret.unlink(missing_ok=True)
         self.qemu: subprocess.Popen | None = None
+        self.domain = ""   # set once a libvirt VM is created
 
     def say(self, text: str) -> None:
         self.log.write((text.rstrip("\n") + "\n").encode())
@@ -166,6 +204,15 @@ class Build:
 
     def boot(self, disk: Path, port: int) -> None:
         job = self.job
+        if LIBVIRT:
+            os.chmod(self.work, 0o711)   # libvirt's QEMU user must reach the disk; the key and scripts inside stay 0600
+            xml = self.work / "domain.xml"
+            name = f"gns3-build-{job['id'][:12]}"
+            xml.write_text(domain_xml(name, f"GNS3 build: {job['name']} {job.get('version', '')}".strip(), job["ram"], job["cpus"], disk, port))
+            self.run(*VIRSH, "create", str(xml))
+            self.domain = name
+            self.say(f"The VM is {self.domain} in Cockpit (Virtual machines): open it to see its screen.")
+            return
         command = ["qemu-system-x86_64", "-enable-kvm", "-cpu", "host", "-machine", "pc", "-m", str(job["ram"]), "-smp", str(job["cpus"]),
                    "-drive", f"file={disk},if=virtio,format=qcow2",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:22", "-device", "virtio-net-pci,netdev=n0",
@@ -177,7 +224,7 @@ class Build:
         deadline = time.monotonic() + SSH_WAIT
         while time.monotonic() < deadline:
             self.check_cancel()
-            if self.qemu.poll() is not None:
+            if not self.vm_running():
                 raise RuntimeError("The build VM stopped before SSH came up. Check that /dev/kvm is usable and the baseline boots.")
             if ssh_banner(port):
                 return
@@ -217,13 +264,23 @@ echo "Build access added for {user}."
 
     def finish_vm(self) -> None:
         deadline = time.monotonic() + SEAL_WAIT
-        while self.qemu.poll() is None:
+        while self.vm_running():
             self.check_cancel()
             if time.monotonic() > deadline:
                 raise RuntimeError("The VM did not power off after sealing.")
             time.sleep(2)
 
+    def vm_running(self) -> bool:
+        if self.domain:   # a transient domain is gone once it powers off, so any error means not running
+            done = subprocess.run([*VIRSH, "domstate", self.domain], capture_output=True, text=True)
+            return done.returncode == 0 and done.stdout.strip() not in ("shut off", "crashed")
+        return bool(self.qemu) and self.qemu.poll() is None
+
     def stop_vm(self) -> None:
+        if self.domain:
+            if self.vm_running():
+                subprocess.run([*VIRSH, "destroy", self.domain], stdout=self.log, stderr=subprocess.STDOUT)
+            return
         if self.qemu and self.qemu.poll() is None:
             self.qemu.terminate()
             try:

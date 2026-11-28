@@ -181,6 +181,7 @@ STUBS = {
     "ssh-keygen": 'for a in "$@"; do last="$a"; done; echo KEY > "$last"; echo "ssh-ed25519 AAAA gns3-lab-builder" > "$last.pub"\n',
     "xorriso": 'for a in "$@"; do if [ "$prev" = "-o" ]; then touch "$a"; fi; prev="$a"; done\n',
     "qemu-system-x86_64": 'while [ ! -f "$STUB_OFF" ]; do sleep 0.1; done\n',
+    "virsh": 'echo "$*" >> "$STUB_VIRSH_LOG"\ncase "$4" in create) cp "$5" "$STUB_VIRSH_LOG.xml";; domstate) [ -f "$STUB_OFF" ] && { echo "error: domain not found" >&2; exit 1; }; echo running;; destroy) touch "$STUB_OFF";; esac\n',
     "ssh": 'case "$*" in *"read -r p"*) IFS= read -r given; [ "$given" = "$STUB_PASSWORD" ] && [ "$SSH_ASKPASS_REQUIRE" = force ] && [ "$($SSH_ASKPASS)" = "$STUB_PASSWORD" ] && echo "Build access added." && exit 0; echo "Permission denied"; exit 255;; esac\nbody=$(cat); if [ -n "$body" ]; then n=$(ls "$STUB_STAGES" | wc -l); printf "%s" "$body" > "$STUB_STAGES/$n.sh"; fi\nif echo "$body" | grep -q gns3-firstboot; then echo GNS3-SEAL-COMPLETE; touch "$STUB_OFF"; fi\nif [ -n "$STUB_FAIL" ] && echo "$body" | grep -q "$STUB_FAIL"; then echo "stub failure"; exit 3; fi\nexit 0\n',
 }
 
@@ -198,6 +199,7 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_FAIL", "")
     monkeypatch.setenv("STUB_PASSWORD", PASSWORD)
     monkeypatch.setenv("STUB_QEMU_LOG", str(tmp_path / "qemu-img.log"))
+    monkeypatch.setenv("STUB_VIRSH_LOG", str(tmp_path / "virsh.log"))
     (tmp_path / "stages").mkdir()
     monkeypatch.setenv("PORTAL_BUILDER_DIR", str(tmp_path / "b"))
     monkeypatch.setenv("GNS3_IMAGES_DIR", str(tmp_path / "images"))
@@ -430,3 +432,39 @@ def test_every_stage_waits_for_apt_and_the_seal_removes_the_setting(service):
         assert "systemctl stop apt-daily.timer apt-daily-upgrade.timer" in text and 'DPkg::Lock::Timeout "600"' in text
     assert install.index("pgrep -x") < install.index("apt-get update")   # wait first, then use apt
     assert "rm -f /etc/apt/apt.conf.d/90-gns3-build" in seal.split("gns3-firstboot", 1)[1]   # removed inside the Ubuntu seal
+
+
+def test_with_libvirt_the_build_vm_is_a_cockpit_visible_domain(service, monkeypatch):
+    module, tmp = service
+    monkeypatch.setattr(module, "LIBVIRT", True)
+    store = pb.JobStore(tmp / "b")
+    job_id = create(store, make(recipe="dvwa", name="DVWA (lab)"))
+    module.Build(store.path(job_id)).execute()
+    assert store.status(job_id)["state"] == "succeeded", (store.path(job_id) / "console.log").read_text()
+    calls = (tmp / "virsh.log").read_text()
+    assert f"create " in calls and f"domstate gns3-build-{job_id[:12]}" in calls and "destroy" not in calls   # it powered off by itself
+    xml = (tmp / "virsh.log.xml").read_text()
+    assert "<title>GNS3 build: DVWA (lab) 1</title>" in xml and "<backend type='passt'/>" in xml and "listen='127.0.0.1'" in xml
+    assert "Cockpit" in (store.path(job_id) / "console.log").read_text() and (tmp / "images" / "dvwa-lab-1.qcow2").exists()
+    cancelled = create(store, make(recipe="dvwa", name="Cancel me"))
+    (tmp / "vm-off").unlink()
+    build = module.Build(store.path(cancelled))
+    module.ssh_banner = lambda port: (store.path(cancelled) / "cancel").touch() or False   # cancel while waiting for SSH
+    build.execute()
+    assert store.status(cancelled)["state"] == "cancelled" and f"destroy gns3-build-{cancelled[:12]}" in (tmp / "virsh.log").read_text()
+
+
+@pytest.mark.skipif(not __import__("shutil").which("virt-xml-validate"), reason="libvirt's XML validator is not installed")
+def test_domain_xml_is_valid_for_libvirt(service, tmp_path):
+    module, _ = service
+    (tmp_path / "d.xml").write_text(module.domain_xml("gns3-build-x", "GNS3 build: a & 'b'", 4096, 4, tmp_path / "disk.qcow2", 40000))
+    result = __import__("subprocess").run(["virt-xml-validate", str(tmp_path / "d.xml"), "domain"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_build_page_links_to_cockpit_only_with_libvirt(client, base, monkeypatch):
+    job_id = client.post("/admin/appliance-builder", data=form(name="Link test"), follow_redirects=False).headers["location"].rsplit("/", 1)[1]
+    assert ":9090/machines" not in client.get(f"/admin/appliance-builder/{job_id}").text
+    monkeypatch.setattr(portal, "BUILDER_LIBVIRT", True)
+    page = client.get(f"/admin/appliance-builder/{job_id}").text
+    assert ":9090/machines" in page and f"gns3-build-{job_id[:12]}" in page

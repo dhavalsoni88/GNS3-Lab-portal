@@ -5,6 +5,20 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.5.0 — 2026-11-28
+
+Optional: `sudo bash scripts/setup-builder.sh --cockpit` once, to use the new feature.
+
+### New
+
+- **Watch a build VM's screen in Cockpit.** With `setup-builder.sh --cockpit` (installs libvirt, passt,
+  Cockpit and cockpit-machines, and sets `PORTAL_BUILDER_LIBVIRT=true`), every build VM runs as a
+  temporary libvirt VM, `gns3-build-<job>`, that appears in Cockpit's **Virtual machines** page with its
+  graphical console while it builds. The screen listens only on 127.0.0.1, the network is unchanged
+  (private user-mode network, SSH on 127.0.0.1), a cancelled build destroys the VM, and the VM is
+  removed when it powers off after sealing. The build page links to Cockpit. Without the option,
+  builds run as before.
+
 ## v9.4.5 — 2026-11-28
 
 ### Fixes
