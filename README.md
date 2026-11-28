@@ -91,6 +91,7 @@ sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
 |---|---|
 | [Architecture](docs/architecture.md) | Components, data, main flows, security model, design decisions |
 | [Installation](docs/installation.md) | Prerequisites, install, service, reverse proxy, verification |
+| [Appliance builder](docs/appliance-builder.md) | Build an Ubuntu-based appliance with an application, qcow2 and .gns3a |
 | [HTTPS](docs/https.md) | Certificates: self-signed, CSR, upload; Nginx setup and recovery |
 | [Configuration](docs/configuration.md) | Every `.env` setting |
 | [Administrator guide](docs/admin-guide.md) | Day-to-day administration, security checklist, maintenance |

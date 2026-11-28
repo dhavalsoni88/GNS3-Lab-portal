@@ -58,6 +58,10 @@ BACKUP_DIR=/etc/nginx/gns3-lab-portal-backup-$STAMP
 
 step "Looking for an Nginx site that already forwards to the portal"
 mapfile -t existing < <(grep -rlE 'proxy_pass[[:space:]]+https?://(127\.0\.0\.1|localhost):8088' /etc/nginx 2>/dev/null | grep -v "^$CONF\$" || true)
+while IFS= read -r link; do   # sites-enabled links to those files must move too, or they would dangle
+  target=$(readlink -f "$link")
+  for file in "${existing[@]}"; do [[ $target == "$(readlink -f "$file")" ]] && existing+=("$link"); done
+done < <(find /etc/nginx -type l 2>/dev/null)
 if [[ ${#existing[@]} -gt 0 && $REPLACE -ne 1 ]]; then
   printf '  %s\n' "${existing[@]}"
   fail "these Nginx files already serve the portal and would clash. Check them, then run again with --replace-existing to move them to a backup folder."

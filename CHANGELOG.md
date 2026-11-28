@@ -5,6 +5,28 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.3.0 — 2026-11-28
+
+Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then run
+`sudo bash scripts/setup-builder.sh` once to use the builder
+([docs/appliance-builder.md](docs/appliance-builder.md)).
+
+### New
+
+- **Appliance builder.** **Administration › Appliance builder** builds a GNS3
+  appliance on top of your Ubuntu baseline: choose an application (WebGoat,
+  DVWA, Splunk, or custom packages and your own script), CPU, memory, disk,
+  icon and notes. A separate service running as the GNS3 user clones the
+  baseline, installs the application in a QEMU/KVM VM, seals the image for
+  cloning, and writes the qcow2 into GNS3's image folder together with the
+  `.gns3a`. The build console streams live in the portal, and one click sends
+  the result through the normal appliance review to every lab.
+- Applications are folders under `deploy/builder/recipes/`; add one without
+  changing code.
+- Published appliances can carry an icon (uploaded to GNS3 as a symbol).
+- Not yet run against a real KVM server: the VM steps are tested only with
+  stub tools. Please report what the console shows on the first build.
+
 ## v9.2.0 — 2026-11-28
 
 Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then, to
