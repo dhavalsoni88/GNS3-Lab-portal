@@ -67,6 +67,7 @@ ln -s /etc/machine-id /var/lib/dbus/machine-id
 systemctl stop systemd-random-seed.service || true
 rm -f /var/lib/systemd/random-seed /var/lib/systemd/network/*.lease
 apt-get clean
+rm -f /etc/apt/apt.conf.d/90-gns3-build
 rm -rf /var/lib/apt/lists/* /tmp/* /root/.bash_history
 find /var/log -type f -exec truncate -s 0 {} +
 rm -f /etc/gns3-lab-build
