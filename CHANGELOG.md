@@ -28,6 +28,7 @@ Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then run
 - **Navigation grouped by task:** Workspace, Appliances (Library, Builder), Access (Users, Roles & groups, Identity providers), Server (Status, HTTPS).
 - **Labs:** one toolbar for status filter, owner filter and search; each lab shows a dot per node (green when running); *Open* is a secondary button so *New lab* is the one primary action.
 - **Appliance builder** is a three-step form with a live summary; the build page shows a terminal-style console beside a step list. **HTTPS** shows the certificate on top and the three methods as tabs. **Appliance library** puts the list first and import and store details beside it.
+- **Theme switch:** Light, Dark or System (follows the operating system) from the top bar and the sign-in page; the choice is remembered in the browser.
 - **Sign-in page** shows what the product does, with a small topology drawing.
 - Not yet run against a real KVM server: the VM steps are tested only with
   stub tools. Please report what the console shows on the first build.

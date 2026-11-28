@@ -19,6 +19,7 @@
     <p class="legal">Authorised users only. Sign-ins are recorded.</p>
   </section>
   <section class="login-panel">
+    {{ theme_switch() }}
     <form class="login-form" method="post" action="/login">
       <h2>Sign in</h2>
       {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}

@@ -3,6 +3,12 @@
 What you can do depends on your role; see [authentication.md](authentication.md#roles).
 Buttons you are not allowed to use are not shown.
 
+## Light, dark or system theme
+
+Use the three small buttons in the top bar (and on the sign-in page): the
+monitor follows your computer's setting, the sun is always light, the moon is
+always dark. The choice is remembered in this browser only.
+
 ## Signing in
 
 Sign in with your portal account, your directory (Windows) account, or your

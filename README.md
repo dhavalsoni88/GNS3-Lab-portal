@@ -14,6 +14,13 @@ storage from the same place, and every action is audited.
 
 ![Labs page](docs/images/labs.png)
 
+| | |
+|---|---|
+| ![Appliance builder](docs/images/appliance-builder.png) | ![Build console](docs/images/build-console.png) |
+| Build an appliance on your Ubuntu baseline | Live build console with a step list |
+| ![HTTPS page](docs/images/https.png) | ![Sign-in page](docs/images/sign-in.png) |
+| Manage the HTTPS certificate | Sign-in |
+
 ## Features
 
 - **Labs.** Create empty labs, or start them from templates or backups. Start
@@ -28,6 +35,25 @@ storage from the same place, and every action is audited.
   anyone can start from, optionally after approval.
 - **Retained backups.** Keep chosen backups in an archive when a lab is
   deleted, with a per-user limit.
+- **Appliance library.** Platform Admins publish a GNS3 appliance (`.gns3a`)
+  once and it appears in every lab. Disks are checked against their
+  checksums, moved or uploaded into GNS3's image folder with a progress bar,
+  and never overwritten. Add notes and a custom icon.
+- **Appliance builder.** Build your own appliance on an Ubuntu baseline:
+  choose WebGoat, DVWA, Splunk or custom packages and a script of your own,
+  and a service running as the GNS3 user installs it in a QEMU/KVM VM, seals
+  the image for cloning and writes the qcow2 and `.gns3a`. The build console
+  streams live in the browser, and one click publishes the result to all labs.
+  Applications are folders in `deploy/builder/recipes/`, so adding one needs no
+  code.
+- **HTTPS from the portal.** Create a self-signed certificate with your FQDN
+  and Subject Alternative Names (DNS names, wildcards, IP addresses), generate
+  a CSR for a certificate authority and install what it returns, or upload a
+  certificate and key (PEM or `.pfx`). Nginx reloads automatically and a
+  rejected certificate is rolled back. The portal never runs as root.
+- **Interface.** A quiet graphite design with a Light, Dark or System theme
+  switch, navigation grouped by task, and one toolbar on the labs list with a
+  dot per node.
 - **Roles.** Platform Admin, Lab Manager, Template Approver, Lab Editor, Lab
   Operator, Viewer and Auditor, enforced on every action.
 - **Sign-in options.** Local accounts, Active Directory over LDAPS, and SAML
@@ -46,10 +72,12 @@ storage from the same place, and every action is audited.
 
 ```mermaid
 flowchart LR
-  U[Users' browsers] -->|HTTPS| P[Reverse proxy]
+  U[Users' browsers] -->|HTTPS| P[Nginx]
   P --> A[GNS3 Lab Portal]
   A -->|REST API| G[GNS3 controller]
   A --> D[(MariaDB)]
+  A -. job files .-> B[Appliance builder service]
+  B -->|QEMU/KVM, qcow2| G
   A -. LDAPS / SAML .-> I[Active Directory / IdP]
   U -->|Open lab| W[GNS3 web UI]
 ```
@@ -73,10 +101,19 @@ sudo install -m 644 deploy/systemd/gns3-lab-portal.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now gns3-lab-portal
 ```
 
-The service listens on `127.0.0.1:8088`. Publish it through an HTTPS reverse
-proxy (an [Nginx example](deploy/nginx/gns3-lab-portal.conf) is included).
-The full walkthrough, including data directories and storage permissions, is
-in the [installation guide](docs/installation.md).
+The service listens on `127.0.0.1:8088`. Put HTTPS in front of it with one
+command, then manage certificates from **Administration › HTTPS**:
+
+```bash
+sudo bash scripts/setup-https.sh --fqdn lab.example.com --san "lab,192.168.10.10"
+```
+
+To build your own appliances, run `sudo bash scripts/setup-builder.sh` once and
+place a stopped Ubuntu `.qcow2` baseline in
+`/var/lib/gns3-lab-portal-builder/baselines/`
+([appliance builder](docs/appliance-builder.md)). The full walkthrough,
+including data directories and storage permissions, is in the
+[installation guide](docs/installation.md).
 
 To upgrade an existing server, including one still on SQLite:
 
@@ -107,8 +144,12 @@ sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
 
 ## Project status
 
-The current release is **v9.0.0**: MariaDB only, roles, Active Directory and
-SSO, tamper-resistant audit and the new interface. Existing v8.x (SQLite)
+The current release is **v9.3.0**: HTTPS and certificate management from the
+portal, the appliance library and builder, lab limits, and the graphite
+interface with a Light, Dark or System theme, on top of the v9.0 MariaDB, roles,
+Active Directory, SSO and tamper-resistant audit foundation. Automated tests
+cover the portal; the appliance builder's real KVM boot has so far only been run
+against stub tools, so report what its console shows on your first build. Existing v8.x (SQLite)
 servers upgrade in one step with `scripts/upgrade.sh`
 ([upgrading](docs/upgrading.md)). Multi-server clusters, the one-step
 installer and on-demand AWS servers are next. See the
