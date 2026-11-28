@@ -2141,7 +2141,7 @@ async def builder_page(request: Request):
         return redirect_login()
     appliance_admin(request)
     return templates.TemplateResponse(request, "admin_builder.html", {
-        **base_context(request, "builder"), "recipes": builder.load_recipes(), "baselines": builder.baselines(BUILDER_DIR),
+        **base_context(request, "builder"), "recipes": builder.load_recipes(BUILDER_DIR / "recipes"), "baselines": builder.baselines(BUILDER_DIR),
         "jobs": await asyncio.to_thread(builder_store().all), "builder_dir": str(BUILDER_DIR), "store": await asyncio.to_thread(appliance_store_info),
         "now": int(time.time()),
     })
@@ -2152,9 +2152,13 @@ async def builder_start(request: Request):
     appliance_admin(request)
     form = await request.form()
     values = {key: value for key, value in form.items() if isinstance(value, str)}
-    recipes = builder.load_recipes()
+    recipes = builder.load_recipes(BUILDER_DIR / "recipes")
     try:
         job = builder.make_job(values, recipes, builder.baselines(BUILDER_DIR), audit_actor(request))
+        store = await asyncio.to_thread(appliance_store_info)
+        need = recipes[job["recipe"]]["min_free_gib"]
+        if store["exists"] and store["free_bytes"] < need * 1024**3:
+            raise ValueError(f"{recipes[job['recipe']]['label']} needs {need} GiB free in the appliance store; {store['free_bytes'] // 1024**3} GiB is free.")
         if (GNS3_IMAGES_DIR / job["image"]).exists():
             raise ValueError(f"A disk named {job['image']} already exists in the appliance store. Use another name or version; existing disks are never replaced.")
         if any(item.get("image") == job["image"] and item["state"] not in builder.FINISHED for item in builder_store().all(200)):
@@ -2166,8 +2170,47 @@ async def builder_start(request: Request):
     except (ValueError, OSError) as exc:
         message = str(exc) if isinstance(exc, ValueError) else "The portal cannot write to the builder folder. Run scripts/setup-builder.sh on the server."
         return builder_back(message)
-    audit(audit_actor(request), "build_appliance_requested", job["name"], {"recipe": job["recipe"], "baseline": job["baseline"], "image": job["image"]})
+    audit(audit_actor(request), "build_appliance_requested", job["name"], {"recipe": job["recipe"], "baseline": job["baseline"], "image": job["image"], "license_accepted": job["license_accepted"], "cpus": job["cpus"], "ram": job["ram"]})
     return RedirectResponse(f"/admin/appliance-builder/{job_id}", status_code=303)
+
+
+@app.post("/admin/appliance-builder/recipes")
+async def builder_import_recipe(request: Request, recipe_file: UploadFile = File(...)):
+    """Add an application from a zip: recipe.json with its three scripts, or an ubuntu-appliance-generator profile."""
+    appliance_admin(request)
+    raw = await recipe_file.read(builder.MAX_RECIPE_ZIP + 1)
+    await recipe_file.close()
+    folder = BUILDER_DIR / "recipes"
+    try:
+        recipe_id = await asyncio.to_thread(builder.import_recipe, raw, folder, set(builder.load_recipes(folder)))
+    except ValueError as exc:
+        return builder_back(str(exc))
+    except OSError:
+        return builder_back("The portal cannot write to the builder's recipes folder. Run scripts/setup-builder.sh on the server.")
+    audit(audit_actor(request), "builder_recipe_imported", recipe_id, {"sha256": hashlib.sha256(raw).hexdigest()})
+    return RedirectResponse(f"/admin/appliance-builder/recipes/{recipe_id}?message={quote_plus('Imported. Read its scripts before the first build: they run as root in the build VM.')}", status_code=303)
+
+
+@app.get("/admin/appliance-builder/recipes/{recipe_id}", response_class=HTMLResponse)
+async def builder_recipe_page(request: Request, recipe_id: str):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    appliance_admin(request)
+    recipe = builder.load_recipes(BUILDER_DIR / "recipes").get(recipe_id)
+    if not recipe:
+        raise HTTPException(404, "That application was not found.")
+    return templates.TemplateResponse(request, "admin_builder_recipe.html", {**base_context(request, "builder"), "recipe": recipe})
+
+
+@app.post("/admin/appliance-builder/recipes/{recipe_id}/delete")
+async def builder_delete_recipe(request: Request, recipe_id: str):
+    appliance_admin(request)
+    recipe = builder.load_recipes(BUILDER_DIR / "recipes").get(recipe_id)
+    if not recipe or recipe["source"] != "imported":
+        raise HTTPException(404, "Only imported applications can be deleted.")
+    await asyncio.to_thread(builder.delete_recipe, BUILDER_DIR / "recipes", recipe_id)
+    audit(audit_actor(request), "builder_recipe_deleted", recipe_id, {})
+    return builder_back(f"Deleted {recipe['label']}. Appliances already built from it are not affected.", "message")
 
 
 @app.get("/admin/appliance-builder/{job_id}", response_class=HTMLResponse)
@@ -2176,7 +2219,7 @@ async def builder_job_page(request: Request, job_id: str):
         return redirect_login()
     appliance_admin(request)
     job = builder_job(job_id)
-    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": builder.load_recipes().get(job["recipe"], {})})
+    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": job.get("recipe_snapshot") or {}})
 
 
 @app.get("/admin/appliance-builder/{job_id}/log")

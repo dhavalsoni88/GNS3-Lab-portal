@@ -1,6 +1,6 @@
 # ADR-0001: Build appliances from requirement-aware profiles with install, check and seal hooks
 
-**Status:** Proposed
+**Status:** Accepted (implemented in v9.4.0)
 **Date:** 2026-11-28
 **Deciders:** Portal owner (Platform Admin for the `ironman` lab)
 
@@ -64,7 +64,9 @@ Concretely:
 4. **Licences are explicit.** For a recipe with `requires_license`, the form shows the
    vendor's terms link and a required checkbox. The acceptance is audited, and passed to the
    guest as `APPLIANCE_ACCEPT_LICENSE=1`.
-5. **Custom recipes are blocked until reviewed.** They get the generator's blocking
+5. **Custom recipes are blocked until reviewed.** *As implemented:* simpler and stricter. A custom build
+   does not start without a clean-up script written on the form (`true` when nothing differs per clone),
+   so there is no unpublishable build state. The original proposal was: They get the generator's blocking
    `seal-app.sh`. A Platform Admin must replace it, by editing an imported recipe or adding
    a repository recipe, before a custom build can publish. *Custom (packages and a script)*
    for throw-away experiments stays possible, but it is labelled *unsealed: not for sharing*

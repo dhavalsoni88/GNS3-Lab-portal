@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}{{ recipe.label }} · Appliance builder{% endblock %}
+{% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/admin/appliance-builder">Appliance builder</a> / {{ recipe.label }}</nav>
+<div class="page-head">
+  <div><h1>{{ recipe.label }}</h1><p class="subtitle">{{ recipe.description }}</p></div>
+  {% if recipe.source == 'imported' %}<form method="post" action="/admin/appliance-builder/recipes/{{ recipe.id }}/delete" onsubmit="return confirm('Delete this imported application? Appliances already built from it stay.')"><button class="danger">Delete</button></form>{% endif %}
+</div>
+
+<div class="split">
+  <section class="stack">
+    {% for name in ['install-app.sh', 'check-app.sh', 'seal-app.sh'] %}
+    <section class="stack" style="gap:8px">
+      <h2 style="margin:0" class="mono">{{ name }}</h2>
+      {% if recipe.hooks.get(name) %}<pre class="term" style="min-height:0">{{ recipe.hooks[name] }}</pre>
+      {% elif recipe.custom %}<p class="muted" style="margin:0">Written on the build form for each custom appliance.</p>{% endif %}
+    </section>
+    {% endfor %}
+  </section>
+  <aside>
+    <section class="card">
+      <h2>Requirements</h2>
+      <dl class="facts">
+        <div><dt>CPUs</dt><dd>{{ recipe.cpus }} <span class="muted">(at least {{ recipe.min_cpus }})</span></dd></div>
+        <div><dt>Memory</dt><dd>{{ recipe.ram }} MiB <span class="muted">(at least {{ recipe.min_ram }})</span></dd></div>
+        <div><dt>Disk</dt><dd>{{ recipe.disk_gb }} GiB</dd></div>
+        <div><dt>Free space</dt><dd>{{ recipe.min_free_gib }} GiB</dd></div>
+        <div><dt>CPU features</dt><dd class="mono">{{ recipe.cpu_flags | join(' ') or 'none' }}</dd></div>
+        <div><dt>Licence</dt><dd>{% if recipe.requires_license %}{% if recipe.license_url %}<a href="{{ recipe.license_url }}" target="_blank" rel="noopener">Must be accepted</a>{% else %}Must be accepted{% endif %}{% else %}None{% endif %}</dd></div>
+        <div><dt>Services stopped before sealing</dt><dd class="mono">{{ recipe.services | join(' ') or 'none' }}</dd></div>
+        <div><dt>Ports</dt><dd class="mono">{% for port in recipe.ports %}{{ port.name }} {{ port.guest_port }}{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</dd></div>
+        <div><dt>Source</dt><dd>{{ 'Built in' if recipe.source == 'built-in' else 'Imported' }}</dd></div>
+      </dl>
+      {% if recipe.usage %}<h3 style="margin-top:16px">Usage text</h3><p class="muted" style="margin:0">{{ recipe.usage }}</p>{% endif %}
+    </section>
+  </aside>
+</div>
+{% endblock %}

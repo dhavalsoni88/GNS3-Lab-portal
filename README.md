@@ -44,8 +44,11 @@ storage from the same place, and every action is audited.
   and a service running as the GNS3 user installs it in a QEMU/KVM VM, seals
   the image for cloning and writes the qcow2 and `.gns3a`. The build console
   streams live in the browser, and one click publishes the result to all labs.
-  Applications are folders in `deploy/builder/recipes/`, so adding one needs no
-  code.
+  Each application states what it needs (CPUs, memory, disk, CPU features,
+  licence); the builder checks the server first, and every image passes the
+  application's own check and clean-up before it is published. Add applications
+  as folders in `deploy/builder/recipes/` or import a zip, including profiles
+  from ubuntu-appliance-generator.
 - **HTTPS from the portal.** Create a self-signed certificate with your FQDN
   and Subject Alternative Names (DNS names, wildcards, IP addresses), generate
   a CSR for a certificate authority and install what it returns, or upload a
@@ -140,11 +143,12 @@ sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
 | [Upgrading](docs/upgrading.md) | Updating an installation; moving from SQLite to MariaDB |
 | [Engineering guide](docs/engineering.md) | Code map, development setup, making changes, releasing |
 | [Roadmap](docs/roadmap.md) | Delivered and planned phases |
+| [Decision records](docs/adr/) | Why the appliance builder works the way it does |
 | [Changelog](CHANGELOG.md) | Release history |
 
 ## Project status
 
-The current release is **v9.3.0**: HTTPS and certificate management from the
+The current release is **v9.4.0**: requirement-aware appliance recipes with import; HTTPS and certificate management from the
 portal, the appliance library and builder, lab limits, and the graphite
 interface with a Light, Dark or System theme, on top of the v9.0 MariaDB, roles,
 Active Directory, SSO and tamper-resistant audit foundation. Automated tests

@@ -3,7 +3,7 @@
 {% block content %}
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/admin/appliance-builder">Appliance builder</a> / {{ job.name }}</nav>
 <div class="page-head">
-  <div><h1>{{ job.name }} <span class="muted">{{ job.version }}</span></h1><p class="subtitle">{{ (recipe.label or job.recipe).split(' (')[0] }} on {{ job.baseline }} · {{ job.cpus }} CPU, {{ job.ram }} MiB, {{ job.disk_gb }} GiB · <code>{{ job.image }}</code></p></div>
+  <div><h1>{{ job.name }} <span class="muted">{{ job.version }}</span></h1><p class="subtitle">{{ (recipe.label or job.recipe).split(' (')[0] }}{% if job.license_accepted %} (licence accepted){% endif %} on {{ job.baseline }} · {{ job.cpus }} CPU, {{ job.ram }} MiB, {{ job.disk_gb }} GiB · <code>{{ job.image }}</code></p></div>
   <div class="row-actions">
     <form method="post" action="/admin/appliance-builder/{{ job.id }}/cancel" data-cancel {% if job.state in ('succeeded', 'failed', 'cancelled') %}hidden{% endif %} onsubmit="return confirm('Stop this build? The VM is discarded.')"><button class="danger">Cancel build</button></form>
     <form method="post" action="/admin/appliance-builder/{{ job.id }}/publish" data-publish {% if job.state != 'succeeded' %}hidden{% endif %}><button class="primary big">Review and publish to all labs</button></form>
@@ -20,12 +20,14 @@
       <p class="muted" data-message>{{ job.message }}</p>
       <div class="progress"><div data-progress style="width:{{ job.percent }}%"></div></div>
       <ol class="steps" data-steps>
+        <li data-at="2">Check the server can hold it</li>
         <li data-at="5">Clone the baseline</li>
         <li data-at="12">Prepare build access</li>
         <li data-at="18">Start the VM</li>
         <li data-at="25">Wait for SSH</li>
         <li data-at="35">Install the application</li>
-        <li data-at="70">Seal the image</li>
+        <li data-at="60">Check the application</li>
+        <li data-at="70">Clean up and seal the image</li>
         <li data-at="80">Publish the disk</li>
       </ol>
     </section>

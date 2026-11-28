@@ -1,16 +1,19 @@
 """Appliance builder: job validation, the portal pages, and the builder service run against stub tools."""
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import stat
 import sys
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
 
 import app as portal
 import portal_builder as pb
+import portal_db as pb_db
 
 PNG = pb.PNG_MAGIC + b"fake"
 
@@ -26,7 +29,7 @@ def base(tmp_path, monkeypatch):
 
 
 def form(**extra):
-    return {"recipe": "custom", "name": "My Tool", "version": "1", "baseline": "ubuntu-base.qcow2", **extra}
+    return {"recipe": "custom", "name": "My Tool", "version": "1", "baseline": "ubuntu-base.qcow2", "seal_script": "true", **extra}
 
 
 def make(**extra):
@@ -36,7 +39,7 @@ def make(**extra):
 def test_recipes_load_and_the_job_form_is_validated():
     recipes = pb.load_recipes()
     assert {"custom", "dvwa", "webgoat", "splunk"} <= set(recipes)
-    assert recipes["webgoat"]["icon"] is not None and recipes["dvwa"]["script"]
+    assert recipes["webgoat"]["icon"] is not None and recipes["dvwa"]["hooks"]["install-app.sh"]
     job = make(packages="nginx, git\nvim", cpus="4")
     assert job["packages"] == ["nginx", "git", "vim"] and job["cpus"] == 4 and job["image"] == "my-tool-1.qcow2"
     for bad in ({"name": "bad;name"}, {"name": ""}, {"baseline": "../../etc/passwd"}, {"recipe": "nope"}, {"packages": "ok; rm -rf /"},
@@ -45,16 +48,33 @@ def test_recipes_load_and_the_job_form_is_validated():
             make(**bad)
 
 
-def test_required_inputs_and_licence_checkbox_are_enforced():
-    with pytest.raises(ValueError):
-        make(recipe="splunk")
-    full = {"input_SPLUNK_URL": "https://x/s.deb", "input_SPLUNK_SHA256": "a" * 64, "input_SPLUNK_ADMIN_PASSWORD": "longpassword"}
+def test_requirements_licence_and_custom_cleanup_are_enforced():
+    splunk = pb.load_recipes()["splunk"]
+    assert splunk["min_ram"] == 12288 and splunk["cpu_flags"] == ["avx", "sse4_2", "aes"] and splunk["requires_license"]
+    assert "initialize-splunk-lab" in splunk["hooks"]["install-app.sh"] and "PASSWORD" not in json.dumps({k: v for k, v in splunk.items() if k not in ("hooks", "icon")})
     with pytest.raises(ValueError, match="licence"):
-        make(recipe="splunk", **full)
-    job = make(recipe="splunk", input_SPLUNK_ACCEPT_LICENSE="yes", **full)
-    assert job["inputs"]["SPLUNK_ACCEPT_LICENSE"] == "yes"
-    with pytest.raises(ValueError):
-        make(recipe="splunk", input_SPLUNK_ACCEPT_LICENSE="yes", **{**full, "input_SPLUNK_URL": "https://x\ninjected"})
+        make(recipe="splunk")
+    with pytest.raises(ValueError, match="Memory"):
+        make(recipe="splunk", accept_license="yes", ram="8192")   # below the application's minimum
+    with pytest.raises(ValueError, match="CPUs"):
+        make(recipe="webgoat", cpus="1")
+    job = make(recipe="splunk", accept_license="yes")
+    assert job["license_accepted"] and job["ram"] == 12288 and job["recipe_snapshot"]["hooks"]["seal-app.sh"] == splunk["hooks"]["seal-app.sh"]
+    with pytest.raises(ValueError, match="clean-up script"):
+        make(seal_script="  ")
+    custom = make(check_script="curl -fs localhost", seal_script="rm -f /etc/app-id")
+    assert custom["recipe_snapshot"]["hooks"] == {"install-app.sh": "", "check-app.sh": "curl -fs localhost", "seal-app.sh": "rm -f /etc/app-id"}
+
+
+def test_recipe_settings_accept_generator_profiles_and_refuse_bad_values():
+    profile = {"id": "elk", "display_name": "Elastic", "version": "9", "cpus": 4, "ram": 8192, "min_cpus": 2, "min_ram": 6144, "disk_gib": 40,
+               "min_free_gib": 7.5, "cpu_flags": ["avx"], "requires_license": False, "services": ["elasticsearch.service"],
+               "ports": [{"name": "web", "host_port": 15601, "guest_port": 5601}], "usage": "Kibana on 5601"}
+    settings = pb.recipe_settings(profile)
+    assert settings["label"] == "Elastic" and settings["disk_gb"] == 40 and settings["min_free_gib"] == 8 and settings["ports"] == [{"name": "web", "guest_port": 5601}]
+    for bad in ({"min_ram": 9000}, {"cpu_flags": ["avx; rm"]}, {"services": ["a b"]}, {"cpus": 99}, {"requires_license": "yes"}, {"license_url": "http://x"}):
+        with pytest.raises(ValueError):
+            pb.recipe_settings({"label": "X", "ram": 8192, **bad})
 
 
 def test_job_store_paths_logs_and_icons(tmp_path):
@@ -152,7 +172,7 @@ STUBS = {
     "ssh-keygen": 'for a in "$@"; do last="$a"; done; echo KEY > "$last"; echo "ssh-ed25519 AAAA gns3-lab-builder" > "$last.pub"\n',
     "xorriso": 'for a in "$@"; do if [ "$prev" = "-o" ]; then touch "$a"; fi; prev="$a"; done\n',
     "qemu-system-x86_64": 'while [ ! -f "$STUB_OFF" ]; do sleep 0.1; done\n',
-    "ssh": 'body=$(cat); echo "ssh $*" | head -c 60 >/dev/null\nif echo "$body" | grep -q gns3-firstboot; then echo GNS3-SEAL-COMPLETE; touch "$STUB_OFF"; else echo "$body" | grep -c "apt-get" >/dev/null; echo "ran: $(echo "$body" | grep -c .) lines"; fi\nexit 0\n',
+    "ssh": 'body=$(cat); if [ -n "$body" ]; then n=$(ls "$STUB_STAGES" | wc -l); printf "%s" "$body" > "$STUB_STAGES/$n.sh"; fi\nif echo "$body" | grep -q gns3-firstboot; then echo GNS3-SEAL-COMPLETE; touch "$STUB_OFF"; fi\nif [ -n "$STUB_FAIL" ] && echo "$body" | grep -q "$STUB_FAIL"; then echo "stub failure"; exit 3; fi\nexit 0\n',
 }
 
 
@@ -165,6 +185,9 @@ def service(tmp_path, monkeypatch):
         (bin_dir / name).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("STUB_OFF", str(tmp_path / "vm-off"))
+    monkeypatch.setenv("STUB_STAGES", str(tmp_path / "stages"))
+    monkeypatch.setenv("STUB_FAIL", "")
+    (tmp_path / "stages").mkdir()
     monkeypatch.setenv("PORTAL_BUILDER_DIR", str(tmp_path / "b"))
     monkeypatch.setenv("GNS3_IMAGES_DIR", str(tmp_path / "images"))
     (tmp_path / "images").mkdir()
@@ -174,7 +197,12 @@ def service(tmp_path, monkeypatch):
     module = importlib.util.module_from_spec(spec)
     sys.modules["appliance_builder_service"] = module
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "host_facts", lambda: (64, 65536, {"avx", "sse4_2", "aes"}))
     return module, tmp_path
+
+
+def stages(tmp):
+    return [(tmp / "stages" / f"{n}.sh").read_text() for n in range(len(list((tmp / "stages").iterdir())))]
 
 
 def test_service_builds_publishes_and_cleans_up(service):
@@ -209,17 +237,116 @@ def test_service_refuses_to_replace_a_disk_and_reports_failures(service):
     assert store.status(second)["state"] == "failed" and not list((tmp / "images").iterdir())
 
 
-def test_service_payload_quotes_inputs_and_cancel_stops_a_build(service):
+def test_service_runs_install_check_and_seal_in_order(service):
     module, tmp = service
     store = pb.JobStore(tmp / "b")
-    job_id = store.create(make(recipe="splunk", input_SPLUNK_URL="https://x/$(touch pwned)", input_SPLUNK_SHA256="a" * 64,
-                               input_SPLUNK_ADMIN_PASSWORD="pass word'; rm", input_SPLUNK_ACCEPT_LICENSE="yes"))
+    job_id = store.create(make(recipe="dvwa", name="DVWA", packages="vim", custom_script="echo extra"))
+    module.Build(store.path(job_id)).execute()
+    assert store.status(job_id)["state"] == "succeeded", (tmp / "b" / "jobs" / job_id / "console.log").read_text()
+    install, check, seal = [text for text in stages(tmp) if text.strip()]   # the SSH probe sends nothing
+    assert install.index("apt-get install -y") < install.index("== install-app.sh") < install.index("== your-script.sh")
+    assert "== check-app.sh" in check and "seal-app.sh" not in check
+    order = [seal.index(marker) for marker in ("== check-app.sh", "systemctl stop apache2", "systemctl stop mariadb", "== seal-app.sh", "rm -rf /root/.gns3-build", "gns3-firstboot")]
+    assert order == sorted(order)
+    assert "APPLIANCE_ACCEPT_LICENSE" not in install   # only a recipe that needs a licence, and only after acceptance
+
+
+def test_a_failing_check_stops_the_build_before_sealing(service, monkeypatch):
+    module, tmp = service
+    monkeypatch.setenv("STUB_FAIL", "PASS: DVWA answers")   # text that only the check stage contains
+    store = pb.JobStore(tmp / "b")
+    job_id = store.create(make(recipe="dvwa", name="DVWA"))
+    module.Build(store.path(job_id)).execute()
+    assert store.status(job_id)["state"] == "failed" and "check failed" in store.status(job_id)["message"]
+    assert not any("gns3-firstboot" in text for text in stages(tmp)) and not list((tmp / "images").iterdir())
+
+
+def test_host_checks_refuse_a_build_the_server_cannot_hold(service, monkeypatch):
+    module, tmp = service
+    store = pb.JobStore(tmp / "b")
+    for facts, expected in (((2, 65536, {"avx", "sse4_2", "aes"}), "needs 4 CPUs"), ((64, 4096, {"avx", "sse4_2", "aes"}), "only 4096 MiB"), ((64, 65536, {"sse4_2"}), "avx, aes")):
+        monkeypatch.setattr(module, "host_facts", lambda facts=facts: facts)
+        job_id = store.create(make(recipe="splunk", accept_license="yes", name=f"S {len(expected)}"))
+        module.Build(store.path(job_id)).execute()
+        assert store.status(job_id)["state"] == "failed" and expected in store.status(job_id)["message"], store.status(job_id)
+    job = make(name="Huge")
+    job["recipe_snapshot"]["min_free_gib"] = 10**6
+    job_id = store.create(job)
+    module.Build(store.path(job_id)).execute()
+    assert "GiB free" in store.status(job_id)["message"] and not stages(tmp)   # nothing was copied or booted
+
+
+def test_stage_scripts_keep_hooks_apart_and_pass_the_licence(service):
+    module, tmp = service
+    store = pb.JobStore(tmp / "b")
+    job_id = store.create(make(recipe="splunk", accept_license="yes", name="Splunk"))
     build = module.Build(store.path(job_id))
     build.work.mkdir(parents=True)
-    script = build.payload(pb.load_recipes()["splunk"]).read_text()
-    assert "export SPLUNK_URL='https://x/$(touch pwned)'" in script and "pass word'\"'\"'; rm" in script
-    assert stat.S_IMODE((build.work / "payload.sh").stat().st_mode) == 0o600
+    recipe = build.job["recipe_snapshot"]
+    recipe["hooks"]["install-app.sh"] = "echo '$(touch pwned)'\nexit 0"
+    text = build.install_stage(recipe).read_text()
+    assert "export APPLIANCE_ACCEPT_LICENSE=1" in text
+    marker = text.split("cat > /root/.gns3-build/install-app.sh <<'", 1)[1].split("'", 1)[0]
+    assert marker.startswith("GNS3_HOOK_") and text.count(marker) == 2 and "bash /root/.gns3-build/install-app.sh" in text   # exit 0 ends only the hook
+    assert stat.S_IMODE((build.work / "install.sh").stat().st_mode) == 0o600
     cancelled = store.create(make(name="Other"))
     (store.path(cancelled) / "cancel").touch()
     module.Build(store.path(cancelled)).execute()
     assert store.status(cancelled)["state"] == "cancelled" and not (tmp / "images" / "other-1.qcow2").exists()
+
+
+# --- importing applications -----------------------------------------------------------------------
+
+def recipe_zip(files):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+GENERATOR = {   # the layout of ubuntu-appliance-generator: profiles/, hooks/<id>/, assets/
+    "gen/profiles/elk.json": json.dumps({"id": "elk", "display_name": "Elastic", "version": "9", "cpus": 4, "ram": 8192, "min_ram": 6144, "disk_gib": 40,
+                                         "services": [], "hooks": {"install-app.sh": "../hooks/elk/install-app.sh", "check-app.sh": "../hooks/elk/check-app.sh",
+                                                                   "seal-app.sh": "../hooks/elk/seal-app.sh"}, "icon": "../assets/elk.png"}),
+    "gen/hooks/elk/install-app.sh": "apt-get install -y elasticsearch\n", "gen/hooks/elk/check-app.sh": "true\n", "gen/hooks/elk/seal-app.sh": "rm -f /etc/elk-id\n",
+    "gen/assets/elk.png": PNG, "gen/generate.py": "print('not used')\n",
+}
+
+
+def test_import_generator_profile_and_plain_recipe(tmp_path):
+    folder = tmp_path / "recipes"
+    assert pb.import_recipe(recipe_zip(GENERATOR), folder, set(pb.load_recipes(folder))) == "elk"
+    elk = pb.load_recipes(folder)["elk"]
+    assert elk["source"] == "imported" and elk["min_ram"] == 6144 and elk["hooks"]["seal-app.sh"] == "rm -f /etc/elk-id\n" and elk["icon"].read_bytes() == PNG
+    plain = {"recipe.json": json.dumps({"label": "Nginx test", "packages": ["nginx"]}), "install-app.sh": "true", "check-app.sh": "true", "seal-app.sh": "true"}
+    assert pb.import_recipe(recipe_zip(plain), folder, set(pb.load_recipes(folder))) == "nginx-test"
+    for files, message in ((GENERATOR, "already exists"),
+                           ({**plain, "recipe.json": json.dumps({"id": "dvwa", "label": "Mine"})}, "already exists"),   # built-in ids cannot be replaced
+                           ({k: v for k, v in plain.items() if k != "seal-app.sh"} | {"recipe.json": json.dumps({"id": "x1", "label": "X"})}, "seal-app.sh"),
+                           ({"p/app.json": json.dumps({"id": "x2", "display_name": "X", "hooks": {"install-app.sh": "../../etc/passwd", "check-app.sh": "c", "seal-app.sh": "s"}})}, "not in the zip"),
+                           ({"a.json": "{}", "b.json": "{}"}, "exactly one")):
+        with pytest.raises(ValueError, match=message):
+            pb.import_recipe(recipe_zip(files), folder, set(pb.load_recipes(folder)))
+    with pytest.raises(ValueError, match="not a zip"):
+        pb.import_recipe(b"plain text", folder, set())
+    assert sorted(p.name for p in folder.iterdir()) == ["elk", "nginx-test"]   # nothing half-written is left behind
+    pb.delete_recipe(folder, "elk")
+    assert "elk" not in pb.load_recipes(folder)
+
+
+def test_import_view_and_delete_in_the_portal(client, base):
+    response = client.post("/admin/appliance-builder/recipes", files={"recipe_file": ("elk.zip", recipe_zip(GENERATOR), "application/zip")}, follow_redirects=False)
+    assert response.headers["location"].startswith("/admin/appliance-builder/recipes/elk")
+    page = client.get("/admin/appliance-builder/recipes/elk")
+    assert page.status_code == 200 and "rm -f /etc/elk-id" in page.text and "6144" in page.text
+    assert "Elastic" in client.get("/admin/appliance-builder").text
+    assert client.post("/admin/appliance-builder/recipes/dvwa/delete").status_code == 404   # built-in recipes stay
+    other = TestClient(portal.app)
+    other.post("/login", data={"username": "plain2", "password": "plain2-password-1"})
+    assert other.post("/admin/appliance-builder/recipes", files={"recipe_file": ("x.zip", recipe_zip(GENERATOR), "application/zip")}).status_code == 403
+    assert client.post("/admin/appliance-builder/recipes/elk/delete", follow_redirects=False).status_code == 303
+    assert client.get("/admin/appliance-builder/recipes/elk").status_code == 404
+    with pb_db.connect() as connection:
+        actions = {row["action"] for row in connection.execute("SELECT action FROM audit_log WHERE target='elk'").fetchall()}
+    assert {"builder_recipe_imported", "builder_recipe_deleted"} <= actions

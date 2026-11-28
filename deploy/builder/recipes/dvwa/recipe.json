@@ -1,4 +1,32 @@
-{"label": "DVWA (Damn Vulnerable Web Application)", "description": "DVWA on Apache, PHP and MariaDB. For isolated training networks only.",
- "packages": ["apache2", "mariadb-server", "php", "php-mysqli", "php-gd", "libapache2-mod-php", "git", "curl"], "inputs": [],
- "ram": 2048, "cpus": 2, "disk_gb": 16, "host_prefix": "dvwa",
- "usage": "Isolated training network only. Browse to http://<guest-ip>/ , sign in as admin / password, open Setup and click Create / Reset Database."}
+{
+ "label": "DVWA (Damn Vulnerable Web Application)",
+ "description": "DVWA on Apache, PHP and MariaDB. For isolated training networks only.",
+ "packages": [
+  "apache2",
+  "mariadb-server",
+  "php",
+  "php-mysqli",
+  "php-gd",
+  "libapache2-mod-php",
+  "git",
+  "curl"
+ ],
+ "ram": 2048,
+ "cpus": 2,
+ "disk_gb": 16,
+ "host_prefix": "dvwa",
+ "usage": "Isolated training network only. Browse to http://<guest-ip>/ , sign in as admin / password, open Setup and click Create / Reset Database.",
+ "services": [
+  "apache2",
+  "mariadb"
+ ],
+ "min_cpus": 1,
+ "min_ram": 1024,
+ "min_free_gib": 4,
+ "ports": [
+  {
+   "name": "web",
+   "guest_port": 80
+  }
+ ]
+}

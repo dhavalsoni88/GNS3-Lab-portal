@@ -11,15 +11,18 @@
       <div class="step-head"><span class="step-num">1</span><h2>Application</h2></div>
       <div class="recipes" role="radiogroup" aria-label="Application">
         {% for id, recipe in recipes.items() %}
-        <label class="option-card"><input type="radio" name="recipe" value="{{ id }}" {% if loop.first %}checked{% endif %} required data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}" data-label="{{ recipe.label }}"><span><strong>{{ recipe.label.split(' (')[0] }}</strong><small>{{ recipe.description }}</small></span></label>
+        <label class="option-card"><input type="radio" name="recipe" value="{{ id }}" {% if loop.first %}checked{% endif %} required data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}" data-min-ram="{{ recipe.min_ram }}" data-min-cpus="{{ recipe.min_cpus }}" data-label="{{ recipe.label }}" data-custom="{{ 'yes' if recipe.custom else '' }}"><span><strong>{{ recipe.label.split(' (')[0] }}</strong><small>{{ recipe.description }}</small><small class="mono">Needs {{ recipe.min_cpus }}+ CPU · {{ recipe.min_ram }}+ MiB · {{ recipe.min_free_gib }} GiB free{% if recipe.cpu_flags %} · {{ recipe.cpu_flags | join(' ') }}{% endif %}{% if recipe.requires_license %} · licence{% endif %}</small></span></label>
         {% endfor %}
       </div>
-      {% for id, recipe in recipes.items() if recipe.inputs %}
-      <fieldset class="form-stack" style="border:0;padding:16px 0 0;margin:0" data-recipe-inputs="{{ id }}" disabled hidden>
-        {% for item in recipe.inputs %}
-        {% if item.kind == 'checkbox' %}<label class="inline-check"><input type="checkbox" name="input_{{ item.name }}" value="yes" required> {{ item.label }}</label>
-        {% else %}<label>{{ item.label }}<input name="input_{{ item.name }}" {% if item.required %}required{% endif %} {% if 'PASSWORD' in item.name %}type="password" autocomplete="new-password"{% endif %} maxlength="2000"></label>{% endif %}
-        {% endfor %}
+      {% for id, recipe in recipes.items() if recipe.requires_license %}
+      <fieldset class="form-stack" style="border:0;padding:16px 0 0;margin:0" data-recipe-only="{{ id }}" disabled hidden>
+        <label class="inline-check"><input type="checkbox" name="accept_license" value="yes" required> I have read and accept the {% if recipe.license_url %}<a href="{{ recipe.license_url }}" target="_blank" rel="noopener">{{ recipe.label }} licence</a>{% else %}{{ recipe.label }} licence{% endif %}</label>
+      </fieldset>
+      {% endfor %}
+      {% for id, recipe in recipes.items() if recipe.custom %}
+      <fieldset class="form-stack" style="border:0;padding:16px 0 0;margin:0" data-recipe-only="{{ id }}" disabled hidden>
+        <label>Check script <span class="muted">(optional)</span><textarea name="check_script" rows="3" spellcheck="false" class="mono" placeholder="curl -fs http://127.0.0.1/ -o /dev/null"></textarea><span class="muted">Runs after the install and again before sealing. If it fails, nothing is published.</span></label>
+        <label>Clean-up before sealing<textarea name="seal_script" rows="3" spellcheck="false" class="mono" required placeholder="true"></textarea><span class="muted">Remove anything that must differ per clone: generated IDs, keys, accounts, data. Write <code>true</code> if the software keeps none.</span></label>
       </fieldset>
       {% endfor %}
     </section>
@@ -85,6 +88,35 @@
     </table>
   </div>
 </section>
+
+<section class="stack">
+  <div class="page-head"><h2 style="margin:0">Applications</h2></div>
+  <div class="split">
+    <div class="table-card">
+      <table class="data responsive">
+        <thead><tr><th scope="col">Application</th><th scope="col">Needs</th><th scope="col">Source</th><th scope="col" class="actions"><span class="visually-hidden">Actions</span></th></tr></thead>
+        <tbody>{% for id, recipe in recipes.items() %}
+          <tr>
+            <td class="primary-cell"><a class="cell-title" href="/admin/appliance-builder/recipes/{{ id }}">{{ recipe.label.split(' (')[0] }}</a><div class="cell-meta mono">{{ id }}</div></td>
+            <td data-label="Needs">{{ recipe.min_cpus }}+ CPU · {{ recipe.min_ram }}+ MiB · {{ recipe.min_free_gib }} GiB{% if recipe.requires_license %} · licence{% endif %}</td>
+            <td data-label="Source">{{ 'Built in' if recipe.source == 'built-in' else 'Imported' }}</td>
+            <td class="actions"><a class="button" href="/admin/appliance-builder/recipes/{{ id }}">Scripts</a></td>
+          </tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <aside>
+      <section class="card form-stack">
+        <h2>Import an application</h2>
+        <form class="form-stack" method="post" action="/admin/appliance-builder/recipes" enctype="multipart/form-data">
+          <label>Recipe zip<input type="file" name="recipe_file" accept=".zip,application/zip" required></label>
+          <div><button>Import</button></div>
+        </form>
+        <p class="muted" style="margin:0">A zip with <code>recipe.json</code>, <code>install-app.sh</code>, <code>check-app.sh</code>, <code>seal-app.sh</code> and an optional <code>icon.png</code>, or an ubuntu-appliance-generator profile with its hooks. The scripts run as root in the build VM: read them before the first build.</p>
+      </section>
+    </aside>
+  </div>
+</section>
 {% endblock %}
 {% block scripts %}<script>
 (()=>{const form=document.querySelector('[data-builder-form]');if(!form)return;
@@ -94,7 +126,8 @@ function summary(){const n=q('[data-name]').value.trim(),v=q('[data-version]').v
 q('[data-summary-image]').textContent=n?`${slug(n)}-${slug(v)}.qcow2`:'—';
 q('[data-summary-resources]').textContent=`${q('input[name=cpus]').value||'?'} CPU · ${q('input[name=ram]').value||'?'} MiB · ${q('input[name=disk_gb]').value||'?'} GiB`}
 function choose(){const r=radios.find(x=>x.checked);if(!r)return;
-form.querySelectorAll('[data-recipe-inputs]').forEach(el=>{const on=el.dataset.recipeInputs===r.value;el.hidden=!on;el.disabled=!on});
+form.querySelectorAll('[data-recipe-only]').forEach(el=>{const on=el.dataset.recipeOnly===r.value;el.hidden=!on;el.disabled=!on});
+q('input[name=cpus]').min=r.dataset.minCpus;q('input[name=ram]').min=r.dataset.minRam;
 q('input[name=cpus]').value=r.dataset.cpus;q('input[name=ram]').value=r.dataset.ram;q('input[name=disk_gb]').value=r.dataset.disk;
 if(!q('[data-name]').dataset.touched)q('[data-name]').value=r.dataset.label.split(' (')[0];summary()}
 q('[data-name]').addEventListener('input',e=>{e.target.dataset.touched='1'});

@@ -5,6 +5,32 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.4.0 — 2026-11-28
+
+Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh` (it creates the new
+`/var/lib/gns3-lab-portal-builder/recipes` folder). Design: [ADR-0001](docs/adr/0001-appliance-recipes-from-generator-profiles.md).
+
+### Changed
+
+- **Applications state what they need.** A recipe declares minimum CPUs and memory, free disk, required
+  CPU features (for example Splunk's `avx sse4_2 aes`), licence, and the services to stop. The form
+  refuses less than the minimum, and the builder checks the server before copying anything.
+- **Install, check, clean up.** Every recipe has `install-app.sh`, `check-app.sh` and `seal-app.sh`. A
+  failing check stops the build before anything is published; the check runs again before sealing.
+- **Splunk is built the safe way** (from the supplied Splunk kit): installed and never started on the
+  golden image; each clone creates its own administrator, GUID and data with
+  `sudo initialize-splunk-lab --accept-license`. The admin password field is gone, and so is the
+  password that v9.3.0 wrote into the image. Rebuild any Splunk appliance made with v9.3.0.
+- **Custom appliances need a clean-up script** before they can be built (`true` if nothing differs per clone).
+- **Licence acceptance** is a checkbox on the form for recipes that need one, and is audited.
+- WebGoat clears student data and DVWA empties its database when sealing.
+
+### New
+
+- **Import an application** from a zip: `recipe.json` with its scripts, or an ubuntu-appliance-generator
+  profile as generated. Imported recipes can be read (**Scripts**) and deleted; built-in ones cannot be
+  replaced. Each build keeps a copy of the scripts it ran.
+
 ## v9.3.0 — 2026-11-28
 
 Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then run
