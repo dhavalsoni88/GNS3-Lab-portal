@@ -9,7 +9,8 @@ the `.gns3a` file, shows the build console live, and hands the result to the nor
 
 1. The builder service checks that this server can hold the build: enough CPUs, free memory and free disk,
    and the CPU features the application needs. If not, it stops before copying anything.
-2. It clones your baseline disk (the baseline is never changed).
+2. It clones your baseline disk (the baseline is never changed). The clone is grown to the disk size you
+   chose; a baseline that is already larger keeps its size, because a disk is never shrunk.
 3. It boots the clone with QEMU/KVM, using a temporary SSH key delivered by cloud-init.
 4. It installs the packages, then the application's `install-app.sh`, then your own script, as root inside
    the VM.

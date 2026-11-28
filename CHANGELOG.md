@@ -5,6 +5,14 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.4.2 — 2026-11-28
+
+### Fixes
+
+- **A build no longer fails when the baseline disk is larger than the application's disk size** (for
+  example a 32 GiB baseline and DVWA's 16 GiB). The builder used to ask `qemu-img` to shrink the disk,
+  which it refuses. Now it only grows a disk; a larger baseline keeps its size, and the console says so.
+
 ## v9.4.1 — 2026-11-28
 
 ### Fixes
