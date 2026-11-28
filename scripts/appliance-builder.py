@@ -29,6 +29,18 @@ IMAGES = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or "/home/gns3/GNS3/image
 SSH_WAIT, RECIPE_WAIT, SEAL_WAIT = 600, 3600, 300
 
 
+# Ubuntu starts apt-daily and unattended-upgrades right after boot, and they hold apt's locks. Pause their
+# timers for this boot only (the image keeps them enabled), wait for a running one to finish, and let apt
+# itself wait for its locks; seal.sh removes that apt setting again.
+APT_QUIET = """systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+printf 'DPkg::Lock::Timeout "600";\\n' > /etc/apt/apt.conf.d/90-gns3-build
+for i in $(seq 1 360); do
+  pgrep -x 'apt|apt-get|dpkg|unattended-upgr' >/dev/null || break
+  [ "$i" = 1 ] && echo "Waiting for Ubuntu's automatic updates to finish..."
+  sleep 5
+done"""
+
+
 # Printed in the console after the check, so the recipe's numbers can be tightened from a real run.
 MEASURE = """echo "Disk used: $(df -h --output=used / | tail -1 | tr -d ' ')  Memory used: $(free -m | awk '/^Mem:/{print $3}') MiB of $(free -m | awk '/^Mem:/{print $2}') MiB" || true
 echo "Listening TCP ports: $(ss -ltnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -nu | tr '\\n' ' ')" || true
@@ -127,7 +139,7 @@ class Build:
     def stage(self, name: str, recipe: dict, steps: list[tuple[str, str]], before: list[str] | None = None) -> Path:
         """One root script for the VM. Each hook is written to a file and run on its own, so an exit in one cannot skip the next."""
         lines = ["#!/usr/bin/env bash", "set -euo pipefail", "export DEBIAN_FRONTEND=noninteractive", "touch /etc/gns3-lab-build",
-                 "install -d -m 700 /root/.gns3-build"]
+                 "install -d -m 700 /root/.gns3-build", APT_QUIET]
         if self.job.get("license_accepted"):
             lines.append("export APPLIANCE_ACCEPT_LICENSE=1")
         lines += before or []

@@ -5,6 +5,16 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.4.5 — 2026-11-28
+
+### Fixes
+
+- **Builds no longer fail with "Could not get lock /var/lib/apt/lists/lock".** Right after boot, Ubuntu's
+  automatic updates (apt-daily, unattended-upgrades) hold apt's locks. Before every install, check and
+  seal step the builder now pauses their timers for that boot only (the image keeps them enabled), waits
+  up to 30 minutes for an update that is already running, and lets apt wait up to 10 minutes for its
+  locks. That apt setting is removed when the image is sealed.
+
 ## v9.4.4 — 2026-11-28
 
 ### Changed

@@ -418,3 +418,15 @@ def test_applications_can_be_hidden_shown_and_deleted_from_the_list(client, base
     assert 'action="/admin/appliance-builder/recipes/elk/delete"' in page and 'recipes/elk/hide' not in page
     client.post("/admin/appliance-builder/recipes/elk/delete")
     assert "elk" not in pb.load_recipes(base / "recipes")
+
+
+def test_every_stage_waits_for_apt_and_the_seal_removes_the_setting(service):
+    module, tmp = service
+    store = pb.JobStore(tmp / "b")
+    job_id = create(store, make(recipe="dvwa", name="Apt"))
+    module.Build(store.path(job_id)).execute()
+    install, check, seal = [t for t in stages(tmp) if t.strip()]
+    for text in (install, check, seal):
+        assert "systemctl stop apt-daily.timer apt-daily-upgrade.timer" in text and 'DPkg::Lock::Timeout "600"' in text
+    assert install.index("pgrep -x") < install.index("apt-get update")   # wait first, then use apt
+    assert "rm -f /etc/apt/apt.conf.d/90-gns3-build" in seal.split("gns3-firstboot", 1)[1]   # removed inside the Ubuntu seal
