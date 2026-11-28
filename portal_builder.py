@@ -6,11 +6,16 @@ Standard library only, so the builder service needs no virtual environment.
 """
 from __future__ import annotations
 
+import io
 import json
+import math
 import os
+import posixpath
 import re
+import shutil
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -22,10 +27,14 @@ JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 TITLE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._+()-]{0,63}$")
 PACKAGE = re.compile(r"^[a-z0-9][a-z0-9+.-]{0,63}$")
 LOGIN = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
-INPUT_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,40}$")
+RECIPE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+CPU_FLAG = re.compile(r"^[a-z0-9_]{1,32}$")
+SERVICE = re.compile(r"^[A-Za-z0-9@._-]{1,80}$")
+HOOKS = ("install-app.sh", "check-app.sh", "seal-app.sh")
 BASELINE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}\.qcow2$")
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_SCRIPT, MAX_ICON, MAX_LOG_CHUNK = 64 * 1024, 1024 * 1024, 64 * 1024
+MAX_RECIPE_ZIP, MAX_ZIP_MEMBERS, MAX_ZIP_UNPACKED = 2 * 1024 * 1024, 100, 4 * 1024 * 1024
 FINISHED = frozenset({"succeeded", "failed", "cancelled"})
 
 
@@ -46,25 +55,204 @@ def slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "appliance"
 
 
-def load_recipes(folder: Path = RECIPE_DIR) -> dict[str, dict[str, Any]]:
-    """Every recipe is a folder: recipe.json, install.sh (optional) and icon.png (optional)."""
-    recipes: dict[str, dict[str, Any]] = {}
-    for item in sorted(folder.iterdir()) if folder.is_dir() else []:
-        try:
-            data = json.loads((item / "recipe.json").read_text())
-        except (OSError, ValueError):
-            continue
-        script = item / "install.sh"
-        icon = item / "icon.png"
-        recipes[item.name] = {
-            "id": item.name, "label": str(data.get("label") or item.name), "description": str(data.get("description") or ""),
-            "packages": [str(p) for p in data.get("packages", []) if PACKAGE.match(str(p))],
-            "inputs": [i for i in data.get("inputs", []) if isinstance(i, dict) and INPUT_NAME.match(str(i.get("name", "")))],
-            "ram": int(data.get("ram", 2048)), "cpus": int(data.get("cpus", 2)), "disk_gb": int(data.get("disk_gb", 16)),
-            "usage": str(data.get("usage") or ""), "host_prefix": slug(str(data.get("host_prefix") or item.name)),
-            "script": script.read_text() if script.is_file() else "", "icon": icon if icon.is_file() else None,
+def _whole(data: dict[str, Any], key: str, default: int, low: int, high: int) -> int:
+    value = data.get(key, default)
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if type(value) is not int or not low <= value <= high:
+        raise ValueError(f"{key} must be a whole number from {low} to {high}.")
+    return value
+
+
+def recipe_settings(data: Any) -> dict[str, Any]:
+    """Check a recipe.json, or a profile from ubuntu-appliance-generator, and return the recipe settings.
+
+    Everything here ends up in the build form, the host checks or the appliance file, so all of it is validated.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("The recipe must be a JSON object.")
+    if "display_name" in data:   # ubuntu-appliance-generator profile
+        version = str(data.get("version") or "")
+        data = {
+            "label": data.get("display_name"), "description": data.get("description") or f"{data.get('display_name')} {version} on Ubuntu".strip(),
+            "cpus": data.get("cpus", 2), "ram": data.get("ram", 2048), "disk_gb": data.get("disk_gib", 16),
+            "min_cpus": data.get("min_cpus", 1), "min_ram": data.get("min_ram", 1024), "min_free_gib": math.ceil(data.get("min_free_gib", 4) or 0),
+            "cpu_flags": data.get("cpu_flags", []), "requires_license": data.get("requires_license", False), "license_url": data.get("license_url") or data.get("vendor_url") or "",
+            "services": data.get("services", []), "ports": data.get("ports", []), "usage": data.get("usage", ""), "host_prefix": data.get("id", ""),
         }
+    label = str(data.get("label") or "").strip()
+    if not label or len(label) > 80:
+        raise ValueError("The recipe needs a label (display name) of up to 80 characters.")
+    cpus, ram = _whole(data, "cpus", 2, 1, 16), _whole(data, "ram", 2048, 512, 65536)
+    settings = {
+        "label": label, "description": str(data.get("description") or "")[:300], "usage": str(data.get("usage") or "")[:2000],
+        "cpus": cpus, "ram": ram, "disk_gb": _whole(data, "disk_gb", 16, 8, 512),
+        "min_cpus": _whole(data, "min_cpus", 1, 1, cpus), "min_ram": _whole(data, "min_ram", 512, 512, ram),
+        "min_free_gib": _whole(data, "min_free_gib", 4, 0, 1024),
+        "requires_license": data.get("requires_license", False), "license_url": str(data.get("license_url") or ""),
+        "custom": data.get("custom", False), "host_prefix": slug(str(data.get("host_prefix") or label))[:24],
+    }
+    for key in ("requires_license", "custom"):
+        if not isinstance(settings[key], bool):
+            raise ValueError(f"{key} must be true or false.")
+    if settings["license_url"] and not settings["license_url"].startswith("https://"):
+        raise ValueError("license_url must start with https://.")
+    lists = {"packages": PACKAGE, "cpu_flags": CPU_FLAG, "services": SERVICE}
+    for key, pattern in lists.items():
+        value = data.get(key, [])
+        if not isinstance(value, list) or len(value) > 50 or not all(isinstance(item, str) and pattern.match(item) for item in value):
+            raise ValueError(f"{key} must be a list of plain names.")
+        settings[key] = value
+    ports = data.get("ports", [])
+    if not isinstance(ports, list) or len(ports) > 20:
+        raise ValueError("ports must be a list.")
+    settings["ports"] = []
+    for port in ports:
+        if not isinstance(port, dict) or type(port.get("guest_port")) is not int or not 1 <= port["guest_port"] <= 65535:
+            raise ValueError("Each port needs a guest_port from 1 to 65535.")
+        settings["ports"].append({"name": slug(str(port.get("name") or "port"))[:24], "guest_port": port["guest_port"]})
+    return settings
+
+
+def _read_recipe(folder: Path, source: str) -> dict[str, Any]:
+    settings = recipe_settings(json.loads((folder / "recipe.json").read_text()))
+    hooks = {name: (folder / name).read_text() for name in HOOKS if (folder / name).is_file()}
+    if not settings["custom"] and set(hooks) != set(HOOKS):
+        raise ValueError("A recipe needs install-app.sh, check-app.sh and seal-app.sh.")
+    icon = folder / "icon.png"
+    return {**settings, "id": folder.name, "source": source, "hooks": hooks, "icon": icon if icon.is_file() else None}
+
+
+def load_recipes(imported: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Built-in recipes from the repository, then the ones imported in the portal. A built-in id always wins."""
+    recipes: dict[str, dict[str, Any]] = {}
+    for root, source in ((RECIPE_DIR, "built-in"), (imported if imported is not None else builder_dir() / "recipes", "imported")):
+        for folder in sorted(root.iterdir()) if root.is_dir() else []:
+            if RECIPE_ID.match(folder.name) and folder.name not in recipes:
+                try:
+                    recipes[folder.name] = _read_recipe(folder, source)
+                except (OSError, ValueError):
+                    continue   # a broken recipe is left out; import refuses to create one
     return recipes
+
+
+def import_recipe(raw: bytes, imported: Path, taken: set[str]) -> str:
+    """Unpack an uploaded recipe zip into <builder dir>/recipes/<id>.
+
+    The zip holds either recipe.json with install-app.sh, check-app.sh, seal-app.sh (and icon.png) beside it, or a
+    profile from ubuntu-appliance-generator whose "hooks" and "icon" entries point at files inside the same zip.
+    """
+    if len(raw) > MAX_RECIPE_ZIP:
+        raise ValueError("The recipe zip is larger than 2 MiB.")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(raw))
+    except zipfile.BadZipFile:
+        raise ValueError("That is not a zip file.") from None
+    with archive:
+        members = {item.filename: item for item in archive.infolist() if not item.is_dir()}
+        if len(members) > MAX_ZIP_MEMBERS or sum(item.file_size for item in members.values()) > MAX_ZIP_UNPACKED:
+            raise ValueError("The recipe zip has too many or too large files.")
+        candidates = [name for name in members if posixpath.basename(name) == "recipe.json"] or [name for name in members if name.endswith(".json")]
+        if len(candidates) != 1:
+            raise ValueError("The zip must contain exactly one recipe.json, or one generator profile (.json).")
+        base = posixpath.dirname(candidates[0])
+
+        def member(relative: str, limit: int) -> bytes:
+            path = posixpath.normpath(posixpath.join(base, relative))
+            if path.startswith(("../", "/")) or path == ".." or path not in members:
+                raise ValueError(f"{relative} is not in the zip.")
+            if members[path].file_size > limit:
+                raise ValueError(f"{relative} is too large.")
+            return archive.read(path)
+
+        try:
+            data = json.loads(member(posixpath.basename(candidates[0]), 256 * 1024))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("The recipe file is not valid JSON.") from None
+        settings = recipe_settings(data)
+        recipe_id = str(data.get("id") or slug(settings["label"]))
+        if not RECIPE_ID.match(recipe_id):
+            raise ValueError("The recipe id must be lowercase letters, digits and hyphens.")
+        if recipe_id in taken:
+            raise ValueError(f"A recipe called {recipe_id} already exists. Change the id in the file, or delete the imported one first.")
+        named = data.get("hooks") if isinstance(data.get("hooks"), dict) else {name: name for name in HOOKS}
+        hooks: dict[str, str] = {}
+        for name in HOOKS:
+            if not isinstance(named.get(name), str):
+                raise ValueError(f"The recipe needs {name}. An application without per-machine identity can use a seal-app.sh that only echoes.")
+            try:
+                hooks[name] = member(named[name], MAX_SCRIPT).decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError(f"{name} is not UTF-8 text.") from None
+        icon_name = data.get("icon") if isinstance(data.get("icon"), str) else ("icon.png" if posixpath.join(base, "icon.png").lstrip("/") in members else "")
+        icon = member(icon_name, MAX_ICON) if icon_name else b""
+        if icon and not icon.startswith(PNG_MAGIC):
+            icon = b""   # an SVG or other format is skipped; GNS3 shows its default icon
+    save_recipe(imported, recipe_id, settings, hooks, icon)
+    return recipe_id
+
+
+def save_recipe(imported: Path, recipe_id: str, settings: dict[str, Any], hooks: dict[str, str], icon: bytes = b"", replace: bool = False) -> None:
+    """Write a checked recipe folder in one step: a half-written recipe is never visible to a build."""
+    settings = {key: value for key, value in recipe_settings(settings).items() if key != "custom"}
+    if not RECIPE_ID.match(recipe_id) or set(hooks) != set(HOOKS) or any(len(text.encode()) > MAX_SCRIPT for text in hooks.values()):
+        raise ValueError("A recipe needs a plain id and install-app.sh, check-app.sh and seal-app.sh of up to 64 KiB each.")
+    target = imported / recipe_id
+    if target.exists() and not replace:
+        raise ValueError(f"A recipe called {recipe_id} already exists.")
+    staging = imported / f".{recipe_id}.{uuid.uuid4().hex}"
+    staging.mkdir(parents=True)
+    try:
+        write_json(staging / "recipe.json", settings)
+        for name, text in hooks.items():
+            (staging / name).write_text(text.replace("\r\n", "\n"))
+        icon_path = target / "icon.png"
+        if icon or (replace and icon_path.is_file()):
+            (staging / "icon.png").write_bytes(icon or icon_path.read_bytes())
+        if replace and target.exists():
+            old = imported / f".{recipe_id}.old.{uuid.uuid4().hex}"
+            os.rename(target, old)
+            os.rename(staging, target)
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            os.rename(staging, target)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+def settings_from_form(form: dict[str, str]) -> dict[str, Any]:
+    """The draft/edit form into recipe settings (recipe_settings then checks every value)."""
+    data: dict[str, Any] = {key: str(form.get(key, "")).strip() for key in ("label", "description", "usage", "license_url", "host_prefix")}
+    for key in ("cpus", "ram", "disk_gb", "min_cpus", "min_ram", "min_free_gib"):
+        try:
+            data[key] = int(str(form.get(key, "")).strip())
+        except ValueError:
+            raise ValueError(f"{key} must be a whole number.") from None
+    for key in ("cpu_flags", "services", "packages"):
+        data[key] = [item for item in re.split(r"[\s,]+", str(form.get(key, ""))) if item]
+    data["requires_license"] = bool(form.get("requires_license"))
+    data["ports"] = []
+    for item in re.split(r"[\s,]+", str(form.get("ports", ""))):
+        if item:
+            name, _, port = item.rpartition(":")
+            if not port.isdigit():
+                raise ValueError("Ports are written name:port, for example web:8080.")
+            data["ports"].append({"name": name or "port", "guest_port": int(port)})
+    return data
+
+
+def make_analysis_job(source: str, created_by: str) -> dict[str, Any]:
+    """A job for the builder service that turns a pasted link or package name into a draft recipe."""
+    import builder_sources   # imported here: builder_sources imports this module
+    kind, value = builder_sources.classify(source)
+    return {"kind": "analyze", "source": source.strip()[:500], "source_kind": kind, "name": value.rsplit("/", 1)[-1][:64] or "source",
+            "version": "", "recipe": "", "image": "", "created_by": created_by}
+
+
+def delete_recipe(imported: Path, recipe_id: str) -> None:
+    if not RECIPE_ID.match(recipe_id) or not (imported / recipe_id).is_dir():
+        raise KeyError(recipe_id)
+    shutil.rmtree(imported / recipe_id)
 
 
 def _number(form: dict[str, str], key: str, label: str, default: int, low: int, high: int) -> int:
@@ -96,27 +284,28 @@ def make_job(form: dict[str, str], recipes: dict[str, dict[str, Any]], available
     packages = [p for p in re.split(r"[\s,]+", str(form.get("packages", ""))) if p]
     if len(packages) > 50 or not all(PACKAGE.match(p) for p in packages):
         raise ValueError("Extra packages: up to 50 Ubuntu package names, separated by spaces or commas.")
-    script = str(form.get("custom_script", "")).replace("\r\n", "\n")
-    if len(script.encode()) > MAX_SCRIPT or "\x00" in script:
-        raise ValueError("The custom script is limited to 64 KiB of text.")
-    notes = str(form.get("notes", "")).strip()[:2000]
-    inputs: dict[str, str] = {}
-    for spec in recipe["inputs"]:
-        value = str(form.get("input_" + spec["name"], "")).strip()
-        if spec.get("kind") == "checkbox":
-            value = "yes" if value else ""
-        if not value and spec.get("required"):
-            raise ValueError(f"{spec.get('label') or spec['name']} is required.")
-        if "\n" in value or "\r" in value or "\x00" in value or len(value) > 2000:
-            raise ValueError(f"{spec.get('label') or spec['name']} must be a single line of up to 2000 characters.")
-        inputs[spec["name"]] = value
+    scripts = {}
+    for key, label in (("custom_script", "Your setup script"), ("check_script", "The check script"), ("seal_script", "The clean-up script")):
+        scripts[key] = str(form.get(key, "")).replace("\r\n", "\n")
+        if len(scripts[key].encode()) > MAX_SCRIPT or "\x00" in scripts[key]:
+            raise ValueError(f"{label} is limited to 64 KiB of text.")
+    if recipe["custom"] and not scripts["seal_script"].strip():
+        raise ValueError("A custom appliance needs a clean-up script that removes per-machine identity before sealing. Write true if the software keeps none.")
+    if recipe["requires_license"] and not form.get("accept_license"):
+        raise ValueError(f"Accept the {recipe['label']} licence to build it.")
+    hooks = dict(recipe["hooks"])
+    if recipe["custom"]:
+        hooks = {"install-app.sh": "", "check-app.sh": scripts["check_script"], "seal-app.sh": scripts["seal_script"]}
+    snapshot = {key: value for key, value in recipe.items() if key not in ("icon", "hooks")}
     return {
         "name": name, "version": version, "baseline": form["baseline"], "recipe": recipe["id"], "login_user": login,
-        "packages": packages, "custom_script": script, "notes": notes, "inputs": inputs, "created_by": created_by,
-        "cpus": _number(form, "cpus", "CPUs", recipe["cpus"], 1, 16),
-        "ram": _number(form, "ram", "Memory (MiB)", recipe["ram"], 512, 65536),
+        "packages": packages, "custom_script": scripts["custom_script"], "notes": str(form.get("notes", "")).strip()[:2000], "created_by": created_by,
+        "license_accepted": bool(recipe["requires_license"]),
+        "cpus": _number(form, "cpus", "CPUs", recipe["cpus"], recipe["min_cpus"], 16),
+        "ram": _number(form, "ram", "Memory (MiB)", recipe["ram"], recipe["min_ram"], 65536),
         "disk_gb": _number(form, "disk_gb", "Disk size (GiB)", recipe["disk_gb"], 8, 512),
         "image": f"{slug(name)}-{slug(version)}.qcow2",
+        "recipe_snapshot": {**snapshot, "hooks": hooks},   # exactly what runs, even if the recipe changes before the build starts
     }
 
 

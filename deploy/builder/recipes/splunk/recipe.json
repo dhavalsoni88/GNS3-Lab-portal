@@ -1,8 +1,35 @@
-{"label": "Splunk Enterprise", "description": "Splunk Enterprise installed from a .deb package you supply (download URL and SHA-256 from splunk.com).",
- "packages": ["curl", "ca-certificates"], "ram": 8192, "cpus": 4, "disk_gb": 64, "host_prefix": "splunk",
- "inputs": [
-  {"name": "SPLUNK_URL", "label": "Splunk .deb download URL (https)", "required": true},
-  {"name": "SPLUNK_SHA256", "label": "SHA-256 of that file", "required": true},
-  {"name": "SPLUNK_ADMIN_PASSWORD", "label": "Password for the Splunk admin user (8+ characters, kept in the image)", "required": true},
-  {"name": "SPLUNK_ACCEPT_LICENSE", "label": "I accept the Splunk software licence agreement", "required": true, "kind": "checkbox"}],
- "usage": "Splunk Web http://<guest-ip>:8000 , user admin. The licence terms you accepted at build time apply to every clone."}
+{
+ "label": "Splunk Enterprise",
+ "description": "Splunk Enterprise 10.6.2.5, installed but never started: each clone creates its own administrator, GUID and data on first boot.",
+ "packages": [],
+ "cpus": 4,
+ "ram": 12288,
+ "disk_gb": 64,
+ "min_cpus": 2,
+ "min_ram": 12288,
+ "min_free_gib": 12,
+ "cpu_flags": [
+  "avx",
+  "sse4_2",
+  "aes"
+ ],
+ "requires_license": true,
+ "license_url": "https://www.splunk.com/en_us/legal/splunk-software-license-agreement.html",
+ "services": [],
+ "ports": [
+  {
+   "name": "web",
+   "guest_port": 8000
+  },
+  {
+   "name": "management",
+   "guest_port": 8089
+  },
+  {
+   "name": "receiver",
+   "guest_port": 9997
+  }
+ ],
+ "host_prefix": "splunk",
+ "usage": "Installed but uninitialized Splunk Enterprise. After the first boot of a clone, run sudo initialize-splunk-lab --accept-license and create its administrator. Splunk Web 8000, management (TLS) 8089, receiver 9997. No credentials, GUID or index data in the image. Lab sizing, not production."
+}

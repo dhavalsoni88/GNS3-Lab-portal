@@ -2,11 +2,13 @@
 """Appliance builder service. Runs as the GNS3 user (it needs /dev/kvm and the QEMU image folder).
 
 Watches <builder dir>/jobs for folders that carry a `queued` marker and builds them one at a time:
-clone the Ubuntu baseline -> boot it with QEMU/KVM -> run the recipe over SSH -> seal -> publish the qcow2
+check the host can hold it -> clone the Ubuntu baseline -> boot it with QEMU/KVM -> install, check and seal the
+application over SSH (the recipe's install-app.sh, check-app.sh, seal-app.sh) -> seal Ubuntu -> publish the qcow2
 into GNS3's image folder and write the .gns3a next to the job. The portal shows console.log and status.json.
 Standard library only.
 """
 import hashlib
+import secrets
 import json
 import os
 import shlex
@@ -19,6 +21,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import builder_sources  # noqa: E402
 import portal_builder as pb  # noqa: E402
 
 BASE = pb.builder_dir()
@@ -26,8 +29,40 @@ IMAGES = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or "/home/gns3/GNS3/image
 SSH_WAIT, RECIPE_WAIT, SEAL_WAIT = 600, 3600, 300
 
 
+# Printed in the console after the check, so the recipe's numbers can be tightened from a real run.
+MEASURE = """echo "Disk used: $(df -h --output=used / | tail -1 | tr -d ' ')  Memory used: $(free -m | awk '/^Mem:/{print $3}') MiB of $(free -m | awk '/^Mem:/{print $2}') MiB" || true
+echo "Listening TCP ports: $(ss -ltnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -nu | tr '\\n' ' ')" || true
+echo "Running services: $(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\\n' ' ')" || true
+"""
+
+
 class Cancelled(Exception):
     pass
+
+
+def host_facts() -> tuple[int, int, set[str]]:
+    """CPUs, available memory (MiB) and CPU flags of this server. The VM runs with -cpu host, so it gets the same flags."""
+    meminfo = Path("/proc/meminfo").read_text()
+    available = int(next(line.split()[1] for line in meminfo.splitlines() if line.startswith("MemAvailable:"))) // 1024
+    flags = next((line.split(":", 1)[1].split() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("flags")), [])
+    return os.cpu_count() or 1, available, set(flags)
+
+
+def preflight(job: dict, recipe: dict) -> None:
+    """Refuse a build this server cannot hold, before any disk is copied or VM started."""
+    cpus, memory, flags = host_facts()
+    if job["cpus"] > cpus:
+        raise RuntimeError(f"The build VM needs {job['cpus']} CPUs; this server has {cpus}.")
+    if job["ram"] > memory:
+        raise RuntimeError(f"The build VM needs {job['ram']} MiB of memory; only {memory} MiB is free now. Stop some labs or lower the memory (minimum {recipe['min_ram']} MiB).")
+    if missing := [flag for flag in recipe["cpu_flags"] if flag not in flags]:
+        raise RuntimeError(f"{recipe['label']} needs CPU features this server lacks: {', '.join(missing)}.")
+    need = recipe["min_free_gib"] * 1024**3
+    (BASE / "work").mkdir(parents=True, exist_ok=True)
+    for folder in {IMAGES, BASE / "work"}:
+        free = shutil.disk_usage(folder).free
+        if free < need:
+            raise RuntimeError(f"{recipe['label']} needs {recipe['min_free_gib']} GiB free in {folder}; {free // 1024**3} GiB is free.")
 
 
 class Build:
@@ -73,19 +108,33 @@ class Build:
                 handle.close()
         return proc.returncode
 
-    def payload(self, recipe: dict) -> Path:
-        """The script that runs as root in the VM: environment, packages, recipe, then the administrator's own script."""
-        lines = ["#!/usr/bin/env bash", "set -euo pipefail", "export DEBIAN_FRONTEND=noninteractive", "touch /etc/gns3-lab-build"]
-        lines += [f"export {name}={shlex.quote(value)}" for name, value in self.job["inputs"].items()]
-        lines += ["apt-get update"]
-        packages = sorted({*recipe["packages"], *self.job["packages"]})
-        if packages:
-            lines.append("apt-get install -y " + " ".join(shlex.quote(item) for item in packages))
-        lines += ["echo '== Recipe'", recipe["script"], "echo '== Your script'", self.job["custom_script"], "echo '== Build steps finished'"]
-        path = self.work / "payload.sh"
+    def stage(self, name: str, recipe: dict, steps: list[tuple[str, str]], before: list[str] | None = None) -> Path:
+        """One root script for the VM. Each hook is written to a file and run on its own, so an exit in one cannot skip the next."""
+        lines = ["#!/usr/bin/env bash", "set -euo pipefail", "export DEBIAN_FRONTEND=noninteractive", "touch /etc/gns3-lab-build",
+                 "install -d -m 700 /root/.gns3-build"]
+        if self.job.get("license_accepted"):
+            lines.append("export APPLIANCE_ACCEPT_LICENSE=1")
+        lines += before or []
+        for hook, text in steps:
+            if not text.strip():
+                continue
+            end = "GNS3_HOOK_" + secrets.token_hex(8)   # a heredoc end marker no script can contain by accident
+            lines += [f"echo '== {hook}'", f"cat > /root/.gns3-build/{hook} <<'{end}'", text.rstrip("\n"), end, f"bash /root/.gns3-build/{hook}"]
+        path = self.work / name
         path.write_text("\n".join(lines) + "\n")
         path.chmod(0o600)
         return path
+
+    def install_stage(self, recipe: dict) -> Path:
+        packages = sorted({*recipe["packages"], *self.job["packages"]})
+        apt = ["apt-get update"] + (["apt-get install -y " + " ".join(shlex.quote(item) for item in packages)] if packages else [])
+        return self.stage("install.sh", recipe, [("install-app.sh", recipe["hooks"]["install-app.sh"]), ("your-script.sh", self.job["custom_script"])], apt)
+
+    def seal_stage(self, recipe: dict) -> Path:
+        stop = [f"systemctl stop {shlex.quote(service)}" for service in recipe["services"]]
+        steps = [("check-app.sh", recipe["hooks"]["check-app.sh"]), ("stop-services.sh", "\n".join(stop)), ("seal-app.sh", recipe["hooks"]["seal-app.sh"]),
+                 ("seal-ubuntu.sh", "rm -rf /root/.gns3-build\n" + f"export HOST_PREFIX={shlex.quote(recipe['host_prefix'])}\n" + (pb.ROOT / "deploy" / "builder" / "seal.sh").read_text())]
+        return self.stage("seal.sh", recipe, steps)
 
     def boot(self, disk: Path, seed: Path, port: int) -> None:
         job = self.job
@@ -128,13 +177,13 @@ class Build:
 
     def build(self) -> None:
         job, folder = self.job, self.folder
-        recipe = pb.load_recipes().get(job["recipe"])
-        if not recipe:
-            raise RuntimeError("The recipe for this job no longer exists.")
+        recipe = job["recipe_snapshot"]
         baseline = BASE / "baselines" / job["baseline"]
         target = IMAGES / job["image"]
         if target.exists():
             raise RuntimeError(f"{target} already exists. Build with another name or version; an existing disk is never replaced.")
+        self.status("running", "Checking this server can hold the build", 2)
+        preflight(job, recipe)
         self.work.mkdir(parents=True, mode=0o700)
         disk, seed, key = self.work / "disk.qcow2", self.work / "seed.iso", self.work / "key"
         self.status("running", "Cloning the Ubuntu baseline", 5)
@@ -157,11 +206,14 @@ class Build:
         self.status("running", "Waiting for the VM to accept SSH", 25)
         self.wait_ssh(port, key)
         self.status("running", "Installing the application (this can take a while)", 35)
-        if self.ssh(port, key, "sudo -n bash -s", stdin=self.payload(recipe), timeout=RECIPE_WAIT):
-            raise RuntimeError("The install script failed. The output above shows the failing command.")
+        if self.ssh(port, key, "sudo -n bash -s", stdin=self.install_stage(recipe), timeout=RECIPE_WAIT):
+            raise RuntimeError("The install failed. The output above shows the failing command.")
+        if recipe["hooks"]["check-app.sh"].strip():
+            self.status("running", "Checking the application", 60)
+            if self.ssh(port, key, "sudo -n bash -s", stdin=self.stage("check.sh", recipe, [("check-app.sh", recipe["hooks"]["check-app.sh"]), ("measure.sh", MEASURE)]), timeout=RECIPE_WAIT):
+                raise RuntimeError("The application check failed, so nothing was published. The output above shows why.")
         self.status("running", "Sealing the image", 70)
-        seal = self.work / "seal.sh"
-        seal.write_text(f"export HOST_PREFIX={shlex.quote(recipe['host_prefix'])}\n" + (pb.ROOT / "deploy" / "builder" / "seal.sh").read_text())
+        seal = self.seal_stage(recipe)
         before = (folder / "console.log").stat().st_size
         self.ssh(port, key, "sudo -n bash -s", stdin=seal, timeout=SEAL_WAIT)   # the VM powers off, so SSH ends abruptly
         self.finish_vm()
@@ -194,10 +246,29 @@ class Build:
             self.status("failed", str(exc)[:300], 0)
         finally:
             self.stop_vm()
-            (IMAGES / (self.job["image"] + ".partial")).unlink(missing_ok=True)
+            if self.job.get("image"):
+                (IMAGES / (self.job["image"] + ".partial")).unlink(missing_ok=True)
             shutil.rmtree(self.work, ignore_errors=True)   # also removes the build key and the install payload
             self.log.close()
             (self.folder / "queued").unlink(missing_ok=True)
+
+
+class Analysis(Build):
+    """Turn a pasted source into draft.json in the job folder; nothing is installed or published."""
+
+    def build(self) -> None:
+        self.status("running", "Looking at the source", 10)
+        self.work.mkdir(parents=True, mode=0o700)
+        recipes = pb.load_recipes(BASE / "recipes")
+        builtin = {key for key, recipe in recipes.items() if recipe["source"] == "built-in"}
+        try:
+            result = builder_sources.draft(self.job["source"], self.work, self.say, set(recipes), builtin)
+        except Exception as exc:   # network, HTTP and package errors all end here, with their message
+            raise RuntimeError(f"Could not make a draft: {exc}") from exc
+        for note in result["notes"]:
+            self.say("note: " + note)
+        pb.write_json(self.folder / "draft.json", result)
+        self.status("succeeded", f"Draft ready: {result['settings']['label']}. Review it and save it as an application.", 100)
 
 
 def recover() -> None:
@@ -223,7 +294,8 @@ def main() -> None:
         waiting = sorted((p for p in (BASE / "jobs").glob("*/queued") if pb.JOB_ID.match(p.parent.name)), key=lambda p: p.stat().st_mtime)
         for marker in waiting[:1]:
             try:
-                Build(marker.parent).execute()
+                kind = json.loads((marker.parent / "job.json").read_text()).get("kind")
+                (Analysis if kind == "analyze" else Build)(marker.parent).execute()
             except (OSError, ValueError, KeyError) as exc:
                 print("job", marker.parent.name, "could not start:", exc, flush=True)
                 marker.unlink(missing_ok=True)

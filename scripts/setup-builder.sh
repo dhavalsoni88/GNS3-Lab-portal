@@ -31,7 +31,7 @@ getent group kvm >/dev/null || fail "no kvm group: this server has no /dev/kvm (
 [[ -e /dev/kvm ]] || fail "/dev/kvm is missing: enable virtualization (and nested virtualization if this is a VM)."
 
 step "Creating $BUILDER_DIR"
-install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 "$BUILDER_DIR" "$BUILDER_DIR/jobs"
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 "$BUILDER_DIR" "$BUILDER_DIR/jobs" "$BUILDER_DIR/recipes"   # recipes: imported in the portal, read by the builder
 install -d -o "$BUILD_USER" -g "$BUILD_USER" -m 0755 "$BUILDER_DIR/baselines" "$BUILDER_DIR/work"
 setfacl -R -m "u:$BUILD_USER:rwX" -d -m "u:$BUILD_USER:rwX" "$BUILDER_DIR/jobs"
 setfacl -R -m "u:$SERVICE_USER:rwX" -d -m "u:$SERVICE_USER:rwX" "$BUILDER_DIR/jobs"

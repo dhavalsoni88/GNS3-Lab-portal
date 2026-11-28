@@ -14,5 +14,3 @@ sed -i 's/^allow_url_include.*/allow_url_include = On/; s/^display_errors.*/disp
 chown -R www-data:www-data /var/www/html
 systemctl enable apache2
 systemctl restart apache2
-curl -fsS http://127.0.0.1/login.php | grep -qi dvwa
-echo "DVWA installed."

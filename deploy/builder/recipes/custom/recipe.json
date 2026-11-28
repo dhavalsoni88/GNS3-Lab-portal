@@ -1,3 +1,14 @@
-{"label": "Custom (packages and your own script)", "description": "Ubuntu with the packages and setup script you provide.",
- "packages": [], "inputs": [], "ram": 2048, "cpus": 2, "disk_gb": 16, "host_prefix": "ubuntu",
- "usage": "Ubuntu with custom software. Check the notes for what was installed."}
+{
+ "label": "Custom (packages and your own script)",
+ "description": "Ubuntu with the packages and setup script you provide.",
+ "packages": [],
+ "ram": 2048,
+ "cpus": 2,
+ "disk_gb": 16,
+ "host_prefix": "ubuntu",
+ "usage": "Ubuntu with custom software. Check the notes for what was installed.",
+ "custom": true,
+ "min_cpus": 1,
+ "min_ram": 1024,
+ "min_free_gib": 4
+}
