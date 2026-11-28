@@ -1,32 +1,49 @@
 {% extends "base.html" %}
 {% block title %}{{ job.name }} · Appliance builder{% endblock %}
 {% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/admin/appliance-builder">Appliance builder</a> / {{ job.name }}</nav>
 <div class="page-head">
-  <div><h1>{{ job.name }} <span class="muted">{{ job.version }}</span></h1><p class="subtitle">{{ recipe.label or job.recipe }} on {{ job.baseline }} · {{ job.cpus }} CPU, {{ job.ram }} MiB, {{ job.disk_gb }} GiB disk · disk file <code>{{ job.image }}</code></p></div>
-  <div class="row-actions"><a class="button" href="/admin/appliance-builder">All builds</a></div>
-</div>
-
-<section class="card form-stack" data-build="{{ job.id }}" data-state="{{ job.state }}">
-  <p style="margin:0"><strong data-state-label>{{ job.state }}</strong> — <span data-message>{{ job.message }}</span></p>
-  <div class="progress"><div data-progress style="width:{{ job.percent }}%"></div></div>
+  <div><h1>{{ job.name }} <span class="muted">{{ job.version }}</span></h1><p class="subtitle">{{ (recipe.label or job.recipe).split(' (')[0] }} on {{ job.baseline }} · {{ job.cpus }} CPU, {{ job.ram }} MiB, {{ job.disk_gb }} GiB · <code>{{ job.image }}</code></p></div>
   <div class="row-actions">
     <form method="post" action="/admin/appliance-builder/{{ job.id }}/cancel" data-cancel {% if job.state in ('succeeded', 'failed', 'cancelled') %}hidden{% endif %} onsubmit="return confirm('Stop this build? The VM is discarded.')"><button class="danger">Cancel build</button></form>
-    <form method="post" action="/admin/appliance-builder/{{ job.id }}/publish" data-publish {% if job.state != 'succeeded' %}hidden{% endif %}><button class="primary">Review and publish to all labs</button></form>
+    <form method="post" action="/admin/appliance-builder/{{ job.id }}/publish" data-publish {% if job.state != 'succeeded' %}hidden{% endif %}><button class="primary big">Review and publish to all labs</button></form>
   </div>
-</section>
+</div>
 
-<section class="card form-stack">
-  <h2>Console</h2>
-  <pre data-console style="max-height:60vh;overflow:auto;white-space:pre-wrap;margin:0" tabindex="0" aria-label="Build console output"></pre>
-</section>
+<div class="split" data-build="{{ job.id }}" data-state="{{ job.state }}">
+  <section class="stack">
+    <pre class="term" data-console tabindex="0" aria-label="Build console output"></pre>
+  </section>
+  <aside>
+    <section class="card">
+      <h2><span class="pill" data-state-pill><span data-state-label>{{ job.state }}</span></span></h2>
+      <p class="muted" data-message>{{ job.message }}</p>
+      <div class="progress"><div data-progress style="width:{{ job.percent }}%"></div></div>
+      <ol class="steps" data-steps>
+        <li data-at="5">Clone the baseline</li>
+        <li data-at="12">Prepare build access</li>
+        <li data-at="18">Start the VM</li>
+        <li data-at="25">Wait for SSH</li>
+        <li data-at="35">Install the application</li>
+        <li data-at="70">Seal the image</li>
+        <li data-at="80">Publish the disk</li>
+      </ol>
+    </section>
+  </aside>
+</div>
 {% endblock %}
 {% block scripts %}<script>
 (()=>{const root=document.querySelector('[data-build]');if(!root)return;
-const out=root.parentElement.querySelector('[data-console]'),label=root.querySelector('[data-state-label]'),message=root.querySelector('[data-message]'),bar=root.querySelector('[data-progress]'),cancel=root.querySelector('[data-cancel]'),publish=root.querySelector('[data-publish]');
+const out=root.querySelector('[data-console]'),label=root.querySelector('[data-state-label]'),pill=root.querySelector('[data-state-pill]'),message=root.querySelector('[data-message]'),bar=root.querySelector('[data-progress]'),steps=[...root.querySelectorAll('[data-steps] li')],
+cancel=document.querySelector('[data-cancel]'),publish=document.querySelector('[data-publish]');
 let offset=0,failures=0;
+function paint(state,percent){pill.className='pill '+({succeeded:'ok',failed:'bad',cancelled:'bad',running:'warn'}[state]||'off');
+let now=-1;steps.forEach((li,i)=>{if(percent>=+li.dataset.at)now=i});
+steps.forEach((li,i)=>{li.className=state==='succeeded'||i<now?'done':i===now?(state==='failed'||state==='cancelled'?'failed':'now'):''})}
+paint(root.dataset.state,parseInt(bar.style.width,10)||0);
 async function poll(){try{const response=await fetch(`/admin/appliance-builder/${root.dataset.build}/log?offset=${offset}`,{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.detail);failures=0;
 if(data.text){const stick=out.scrollTop+out.clientHeight>=out.scrollHeight-20;out.textContent+=data.text;if(stick)out.scrollTop=out.scrollHeight}
-offset=data.offset;label.textContent=data.state;message.textContent=data.message;bar.style.width=data.percent+'%';
+offset=data.offset;label.textContent=data.state;message.textContent=data.message;bar.style.width=data.percent+'%';paint(data.state,data.percent);
 const done=['succeeded','failed','cancelled'].includes(data.state);cancel.hidden=done;publish.hidden=data.state!=='succeeded';
 if(done&&!data.text)return}catch(error){if(++failures>5){message.textContent='Progress check interrupted. Refresh this page.';return}}
 setTimeout(poll,2000)}

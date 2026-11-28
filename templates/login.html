@@ -3,16 +3,25 @@
 {% block login %}
 <div class="login-layout">
   <section class="login-hero">
-    <div style="font-weight:700;font-size:18px;color:#fff">GNS3 Lab Portal</div>
+    <div class="wordmark">GNS3 Lab Portal</div>
     <div>
-      <h1>Your network labs, ready when you are.</h1>
-      <p>Create, back up and share GNS3 labs from one place.</p>
+      <h1>Network labs for every learner, on your own server.</h1>
+      <p>Create, back up and share GNS3 labs, and publish appliances to all of them.</p>
     </div>
-    <p class="small" style="color:var(--side-muted);margin:0">Authorised users only. Sign-ins are recorded.</p>
+    <svg class="topology" viewBox="0 0 520 200" role="img" aria-label="Three routers linked to a switch, all links up">
+      <path d="M80 40 L260 100 M440 40 L260 100 M260 100 L260 168 M80 40 L440 40" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity=".55"/>
+      <g fill="#0f0f10" stroke="currentColor" stroke-width="1.5">
+        <rect x="56" y="22" width="48" height="36" rx="8"/><rect x="416" y="22" width="48" height="36" rx="8"/><rect x="236" y="82" width="48" height="36" rx="8"/><rect x="236" y="150" width="48" height="36" rx="8"/>
+      </g>
+      <g class="link-on"><circle cx="170" cy="70" r="4"/><circle cx="350" cy="70" r="4"/><circle cx="260" cy="134" r="4"/><circle cx="260" cy="40" r="4"/></g>
+      <g fill="currentColor" font-family="ui-monospace,Menlo,Consolas,monospace" font-size="11"><text x="80" y="46" text-anchor="middle">R1</text><text x="440" y="46" text-anchor="middle">R2</text><text x="260" y="104" text-anchor="middle">SW1</text><text x="260" y="172" text-anchor="middle">PC1</text></g>
+    </svg>
+    <p class="legal">Authorised users only. Sign-ins are recorded.</p>
   </section>
   <section class="login-panel">
+    {{ theme_switch() }}
     <form class="login-form" method="post" action="/login">
-      <h2 style="font-size:22px;margin:0">Sign in</h2>
+      <h2>Sign in</h2>
       {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
       {% for provider in saml_providers %}
       <a class="button big" href="/auth/saml/{{ provider.provider_id }}/login">Continue with {{ provider.name }}</a>
