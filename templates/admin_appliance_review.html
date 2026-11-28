@@ -5,7 +5,7 @@
 <div class="page-head">
   <div><h1>{{ draft.template.name }}</h1><p class="subtitle">Check that the server has every disk, add notes, then publish to all labs.</p></div>
 </div>
-{% if name_taken %}<p class="error" role="alert">A template named {{ draft.template.name }} already exists in GNS3, so this one cannot be published. Nothing was changed.</p>{% endif %}
+{% if name_taken %}<p class="error" role="alert">A template named {{ draft.template.name }} already exists in GNS3. Choose another name below before publishing.</p>{% endif %}
 
 {% if job_id %}
 <section class="card" data-appliance-job-url="/admin/appliance-jobs/{{ job_id }}" role="status">
@@ -15,6 +15,13 @@
   <p class="muted">This runs on the server: you can leave this page and come back to it.</p>
 </section>
 {% endif %}
+
+<section class="card form-stack">
+  <h2>Settings from the appliance file</h2>
+  <p style="margin:0">{{ draft.template.ram }} MB RAM · {{ draft.template.cpus or 1 }} vCPU · {{ draft.template.adapters or 1 }} network adapter(s) · {{ draft.template.platform or 'x86_64' }}</p>
+  {% if qemu_binary %}<p class="muted" style="margin:0">QEMU program on the server: <code>{{ qemu_binary }}</code></p>
+  {% else %}<p class="error" style="margin:0">No <code>qemu-system-{{ draft.template.platform or 'x86_64' }}</code> was found on the GNS3 server, so users will have to choose a QEMU program themselves. Install QEMU for this CPU first.</p>{% endif %}
+</section>
 
 <section class="card form-stack">
   <h2>Disks</h2>
@@ -49,10 +56,11 @@
 <section class="card form-stack">
   <h2>Publish</h2>
   <form class="form-stack" method="post" action="/admin/appliances/{{ draft_id }}/publish">
+    <label>Template name <span class="muted">(how it is listed in GNS3; you can change it)</span><input name="name" maxlength="200" required value="{{ draft.template.name }}"></label>
     <label>Notes <span class="muted">(optional)</span><textarea name="notes" rows="5" maxlength="2000" placeholder="How to use this appliance: default login, first-boot steps, licence notes…">{{ draft.notes }}</textarea></label>
     <p class="muted" style="margin:0">Shown to users under <strong>Usage</strong> when they configure the appliance in GNS3.</p>
     <div><button class="primary big" {% if not can_publish %}disabled{% endif %}>Publish to all labs</button></div>
-    {% if not can_publish and not name_taken %}<p class="muted" style="margin:0">Every disk has to be in the store or found on the server first.</p>{% endif %}
+    {% if not can_publish %}<p class="muted" style="margin:0">Every disk has to be in the store or found on the server first.</p>{% endif %}
   </form>
 </section>
 {% endblock %}

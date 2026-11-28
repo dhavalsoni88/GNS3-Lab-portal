@@ -390,7 +390,9 @@ def appliances(tmp_path, monkeypatch, client):
     elsewhere.mkdir()
     monkeypatch.setattr(portal, "GNS3_IMAGES_DIR", store)
     monkeypatch.setattr(portal, "APPLIANCE_SEARCH_DIRS", (tmp_path / "images",))
-    state = {"templates": [{"name": "Existing router", "template_type": "qemu", "category": "router"}], "posted": [], "store": store, "elsewhere": elsewhere}
+    state = {"templates": [{"name": "Existing router", "template_type": "qemu", "category": "router"}], "posted": [], "store": store, "elsewhere": elsewhere,
+             "binaries": [{"path": "/usr/bin/qemu-system-aarch64"}, {"path": "/usr/bin/qemu-system-x86_64"}]}
+    monkeypatch.setattr(portal.shutil, "which", lambda name: None)   # never depend on the machine running the tests
 
     def stub(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v2/templates" and request.method == "POST":
@@ -398,6 +400,8 @@ def appliances(tmp_path, monkeypatch, client):
             return httpx.Response(201, json={})
         if request.url.path == "/v2/templates":
             return httpx.Response(200, json=state["templates"])
+        if request.url.path == "/v2/computes/local/qemu/binaries":
+            return httpx.Response(200, json=state["binaries"])
         return httpx.Response(404, json={})
 
     original = portal.app.state.gns3_client
@@ -476,6 +480,7 @@ def test_publishing_moves_found_disks_and_registers_the_template_with_notes(clie
     assert template["name"] == "Win Server 2019" and template["hda_disk_image"] == "winserver2019.qcow2"
     assert template["usage"] == "Login: administrator. Set the password on first boot."                # shown under Usage in GNS3
     assert template["ram"] == 4096 and template["platform"] == "x86_64" and "kvm" not in template
+    assert template["qemu_path"] == "/usr/bin/qemu-system-x86_64"             # without it GNS3 warns "Could not find '' in the Qemu binaries list"
     assert "Existing router" in [item["name"] for item in appliances["templates"]]
 
     appliances["templates"].append({"name": "Win Server 2019"})                                          # same name: refused
@@ -601,3 +606,38 @@ def test_a_disk_on_another_filesystem_is_copied_checked_and_then_removed(client,
         assert [path.name for path in other_disk_store.iterdir()] == ["winserver2019.qcow2"]     # no .part file left
     finally:
         shutil.rmtree(other_disk_store, ignore_errors=True)
+
+
+def test_default_template_name_does_not_repeat_the_version():
+    base = appliance_file()
+    base["name"], base["versions"][0]["name"] = "WebGoat on Ubuntu 26.04 gold-v1", "gold-v1"
+    assert portal.appliance_template(base, "")[0]["name"] == "WebGoat on Ubuntu 26.04 gold-v1"      # version already in the name
+    base["name"] = "WebGoat"
+    assert portal.appliance_template(base, "")[0]["name"] == "WebGoat gold-v1"                      # version added when it is not
+
+
+def test_template_name_can_be_chosen_when_publishing(client, appliances):
+    review = check_appliance(client)
+    (appliances["store"] / "winserver2019.qcow2").write_bytes(DISK)
+    assert "Template name" in client.get(review).text and 'value="Win Server 2019"' in client.get(review).text
+    appliances["templates"].append({"name": "Taken name"})
+    assert "Choose+another+name" in client.post(review + "/publish", data={"name": "Taken name"}, follow_redirects=False).headers["location"]
+    assert "200+characters" in client.post(review + "/publish", data={"name": "x" * 201}, follow_redirects=False).headers["location"]
+    assert appliances["posted"] == []
+    job = wait_for_job(client, client.post(review + "/publish", data={"name": "  Windows lab server  "}, follow_redirects=False).headers["location"])
+    assert job["status"] == "completed" and "Windows lab server" in job["message"]
+    assert appliances["posted"][0]["name"] == "Windows lab server"                                   # trimmed, and used as typed
+
+
+def test_qemu_program_comes_from_gns3_then_the_server_and_is_shown(client, appliances, monkeypatch):
+    review = check_appliance(client)
+    assert "/usr/bin/qemu-system-x86_64" in client.get(review).text
+    appliances["binaries"] = []                                                                     # GNS3 lists none: fall back to the server's PATH
+    monkeypatch.setattr(portal.shutil, "which", lambda name: f"/opt/qemu/bin/{name}")
+    assert "/opt/qemu/bin/qemu-system-x86_64" in client.get(review).text
+    monkeypatch.setattr(portal.shutil, "which", lambda name: None)                                  # nowhere: say so instead of publishing blind
+    page = client.get(review).text
+    assert "No <code>qemu-system-x86_64</code> was found" in page
+    (appliances["store"] / "winserver2019.qcow2").write_bytes(DISK)
+    wait_for_job(client, client.post(review + "/publish", data={}, follow_redirects=False).headers["location"])
+    assert "qemu_path" not in appliances["posted"][0]
