@@ -34,6 +34,7 @@ from argon2.exceptions import InvalidHashError, VerificationError
 
 import portal_auth as auth
 import portal_db as db
+import portal_builder as builder
 import portal_tls as tls
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -81,6 +82,7 @@ GNS3_SNAPSHOTS_DIR = Path(GNS3_SNAPSHOTS_DIR_VALUE).expanduser() if GNS3_SNAPSHO
 GNS3_ROOT = GNS3_PROJECTS_DIR.parent if GNS3_PROJECTS_DIR else Path("/home/gns3/GNS3")
 GNS3_IMAGES_DIR = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or GNS3_ROOT / "images" / "QEMU").expanduser()
 APPLIANCE_SEARCH_DIRS = tuple(Path(item.strip()).expanduser() for item in os.getenv("PORTAL_APPLIANCE_SEARCH_DIRS", str(GNS3_ROOT / "images")).split(",") if item.strip())
+BUILDER_DIR = builder.builder_dir()
 TLS_DIR = Path(os.getenv("PORTAL_TLS_DIR", str(BASE_DIR / "data" / "tls"))).expanduser()
 # Written by the root helper that reloads Nginx (scripts/apply-tls.sh); the portal only reads it.
 TLS_STATUS_FILE = Path(os.getenv("PORTAL_TLS_STATUS_FILE", "/run/gns3-lab-portal-tls.status"))
@@ -1399,6 +1401,14 @@ async def run_appliance_job(job: dict[str, Any], draft: dict[str, Any], states: 
                 moved.append(state["name"])
         if notes.strip():
             template["usage"] = notes.strip()[:2000]  # shown under Usage when the appliance is configured in GNS3
+        if draft.get("icon"):
+            try:
+                icon = await asyncio.to_thread(Path(draft["icon"]).read_bytes)
+                symbol = f"{builder.slug(template['name'])}-{hashlib.sha256(icon).hexdigest()[:16]}.png"
+                await gns3("POST", f"/v2/symbols/{symbol}/raw", content=icon)
+                template["symbol"] = symbol
+            except (HTTPException, OSError):
+                portal_logger.warning("appliance_icon_failed name=%s", template["name"])   # the appliance is published with GNS3's default icon
         job.update(progress_percent=95, message="Registering the appliance in GNS3…")
         if binary := await qemu_binary_for(str(template.get("platform") or "x86_64")):
             template["qemu_path"] = binary
@@ -2105,6 +2115,104 @@ async def appliance_job_status(request: Request, job_id: str):
     if not job:
         raise HTTPException(404, "Job not found. It may have been cleared after a portal restart.")
     return JSONResponse({key: job.get(key) for key in ("status", "progress_percent", "message")})
+
+
+# --- Appliance builder ------------------------------------------------------------
+# The portal only writes job files and reads progress; scripts/appliance-builder.py (GNS3 user, KVM) does the work.
+
+def builder_store() -> builder.JobStore:
+    return builder.JobStore(BUILDER_DIR)
+
+
+def builder_job(job_id: str) -> dict[str, Any]:
+    try:
+        return builder_store().get(job_id)
+    except KeyError:
+        raise HTTPException(404, "That build was not found.") from None
+
+
+def builder_back(text: str, kind: str = "error", path: str = "/admin/appliance-builder") -> RedirectResponse:
+    return RedirectResponse(f"{path}?{kind}={quote_plus(text)}", status_code=303)
+
+
+@app.get("/admin/appliance-builder", response_class=HTMLResponse)
+async def builder_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    appliance_admin(request)
+    return templates.TemplateResponse(request, "admin_builder.html", {
+        **base_context(request, "builder"), "recipes": builder.load_recipes(), "baselines": builder.baselines(BUILDER_DIR),
+        "jobs": await asyncio.to_thread(builder_store().all), "builder_dir": str(BUILDER_DIR), "store": await asyncio.to_thread(appliance_store_info),
+        "now": int(time.time()),
+    })
+
+
+@app.post("/admin/appliance-builder")
+async def builder_start(request: Request):
+    appliance_admin(request)
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    recipes = builder.load_recipes()
+    try:
+        job = builder.make_job(values, recipes, builder.baselines(BUILDER_DIR), audit_actor(request))
+        if (GNS3_IMAGES_DIR / job["image"]).exists():
+            raise ValueError(f"A disk named {job['image']} already exists in the appliance store. Use another name or version; existing disks are never replaced.")
+        if any(item.get("image") == job["image"] and item["state"] not in builder.FINISHED for item in builder_store().all(200)):
+            raise ValueError("A build for that name and version is already waiting or running.")
+        upload = form.get("icon")
+        icon = await upload.read(builder.MAX_ICON + 1) if isinstance(upload, UploadFile) and upload.filename else b""
+        recipe_icon = recipes[job["recipe"]]["icon"]
+        job_id = builder_store().create(job, icon or (recipe_icon.read_bytes() if recipe_icon else None))
+    except (ValueError, OSError) as exc:
+        message = str(exc) if isinstance(exc, ValueError) else "The portal cannot write to the builder folder. Run scripts/setup-builder.sh on the server."
+        return builder_back(message)
+    audit(audit_actor(request), "build_appliance_requested", job["name"], {"recipe": job["recipe"], "baseline": job["baseline"], "image": job["image"]})
+    return RedirectResponse(f"/admin/appliance-builder/{job_id}", status_code=303)
+
+
+@app.get("/admin/appliance-builder/{job_id}", response_class=HTMLResponse)
+async def builder_job_page(request: Request, job_id: str):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    appliance_admin(request)
+    job = builder_job(job_id)
+    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": builder.load_recipes().get(job["recipe"], {})})
+
+
+@app.get("/admin/appliance-builder/{job_id}/log")
+async def builder_log(request: Request, job_id: str, offset: int = 0):
+    appliance_admin(request)
+    job = builder_job(job_id)
+    text, new_offset = await asyncio.to_thread(builder_store().read_log, job_id, offset)
+    return JSONResponse({"text": text, "offset": new_offset, "state": job["state"], "message": job["message"], "percent": job["percent"]})
+
+
+@app.post("/admin/appliance-builder/{job_id}/cancel")
+async def builder_cancel(request: Request, job_id: str):
+    appliance_admin(request)
+    if builder_job(job_id)["state"] not in builder.FINISHED:
+        builder_store().cancel(job_id)
+        audit(audit_actor(request), "build_appliance_cancelled", job_id, {})
+    return RedirectResponse(f"/admin/appliance-builder/{job_id}", status_code=303)
+
+
+@app.post("/admin/appliance-builder/{job_id}/publish")
+async def builder_publish(request: Request, job_id: str):
+    """Hand a finished build to the normal appliance review page, which registers it in GNS3 for every lab."""
+    appliance_admin(request)
+    job = builder_job(job_id)
+    back = f"/admin/appliance-builder/{job_id}"
+    if job["state"] != "succeeded":
+        return builder_back("This build has not finished successfully.", path=back)
+    folder = builder_store().path(job_id)
+    try:
+        template, images, default_notes = appliance_template(json.loads((folder / "result.gns3a").read_text()), "")
+    except (OSError, ValueError) as exc:
+        return builder_back(f"The appliance file of this build cannot be used: {exc}", path=back)
+    icon = folder / "icon.png"
+    draft_id = uuid.uuid4().hex
+    app.state.appliance_drafts[draft_id] = {"template": template, "images": images, "notes": default_notes, "created": time.monotonic(), "icon": str(icon) if icon.is_file() else ""}
+    return RedirectResponse(f"/admin/appliances/{draft_id}", status_code=303)
 
 
 # --- HTTPS certificates -----------------------------------------------------------

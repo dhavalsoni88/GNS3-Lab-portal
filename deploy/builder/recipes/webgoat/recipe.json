@@ -1,0 +1,3 @@
+{"label": "WebGoat 2026.4 + WebWolf", "description": "OWASP WebGoat and WebWolf on Ubuntu (pinned release, checksum verified). For isolated training networks only.",
+ "packages": ["openjdk-25-jre-headless", "ca-certificates", "curl"], "inputs": [], "ram": 4096, "cpus": 2, "disk_gb": 32, "host_prefix": "webgoat",
+ "usage": "Isolated training network only. WebGoat http://webgoat.lab:8080/WebGoat/ and WebWolf http://webwolf.lab:9090/WebWolf/. Map both names to this guest's IP on your browser machine, then register a student account."}

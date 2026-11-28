@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}{{ job.name }} · Appliance builder{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>{{ job.name }} <span class="muted">{{ job.version }}</span></h1><p class="subtitle">{{ recipe.label or job.recipe }} on {{ job.baseline }} · {{ job.cpus }} CPU, {{ job.ram }} MiB, {{ job.disk_gb }} GiB disk · disk file <code>{{ job.image }}</code></p></div>
+  <div class="row-actions"><a class="button" href="/admin/appliance-builder">All builds</a></div>
+</div>
+
+<section class="card form-stack" data-build="{{ job.id }}" data-state="{{ job.state }}">
+  <p style="margin:0"><strong data-state-label>{{ job.state }}</strong> — <span data-message>{{ job.message }}</span></p>
+  <div class="progress"><div data-progress style="width:{{ job.percent }}%"></div></div>
+  <div class="row-actions">
+    <form method="post" action="/admin/appliance-builder/{{ job.id }}/cancel" data-cancel {% if job.state in ('succeeded', 'failed', 'cancelled') %}hidden{% endif %} onsubmit="return confirm('Stop this build? The VM is discarded.')"><button class="danger">Cancel build</button></form>
+    <form method="post" action="/admin/appliance-builder/{{ job.id }}/publish" data-publish {% if job.state != 'succeeded' %}hidden{% endif %}><button class="primary">Review and publish to all labs</button></form>
+  </div>
+</section>
+
+<section class="card form-stack">
+  <h2>Console</h2>
+  <pre data-console style="max-height:60vh;overflow:auto;white-space:pre-wrap;margin:0" tabindex="0" aria-label="Build console output"></pre>
+</section>
+{% endblock %}
+{% block scripts %}<script>
+(()=>{const root=document.querySelector('[data-build]');if(!root)return;
+const out=root.parentElement.querySelector('[data-console]'),label=root.querySelector('[data-state-label]'),message=root.querySelector('[data-message]'),bar=root.querySelector('[data-progress]'),cancel=root.querySelector('[data-cancel]'),publish=root.querySelector('[data-publish]');
+let offset=0,failures=0;
+async function poll(){try{const response=await fetch(`/admin/appliance-builder/${root.dataset.build}/log?offset=${offset}`,{cache:'no-store'}),data=await response.json();if(!response.ok)throw new Error(data.detail);failures=0;
+if(data.text){const stick=out.scrollTop+out.clientHeight>=out.scrollHeight-20;out.textContent+=data.text;if(stick)out.scrollTop=out.scrollHeight}
+offset=data.offset;label.textContent=data.state;message.textContent=data.message;bar.style.width=data.percent+'%';
+const done=['succeeded','failed','cancelled'].includes(data.state);cancel.hidden=done;publish.hidden=data.state!=='succeeded';
+if(done&&!data.text)return}catch(error){if(++failures>5){message.textContent='Progress check interrupted. Refresh this page.';return}}
+setTimeout(poll,2000)}
+poll()})();
+</script>{% endblock %}

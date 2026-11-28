@@ -1,0 +1,18 @@
+[Unit]
+Description=GNS3 Lab Portal appliance builder
+After=network.target
+
+[Service]
+Type=simple
+User=@BUILD_USER@
+SupplementaryGroups=kvm
+WorkingDirectory=@PORTAL_DIR@
+EnvironmentFile=-@PORTAL_DIR@/.env
+ExecStart=/usr/bin/python3 @PORTAL_DIR@/scripts/appliance-builder.py
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

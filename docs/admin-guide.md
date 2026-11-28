@@ -113,6 +113,10 @@ Use **Lab Operator** for people who only start and stop labs, and
     `-no-hpet`, `-global`, `-boot`), because they run on the GNS3 server;
     anything else is refused with a message naming it.
   - QEMU appliances only for now. Only Platform Admins can publish.
+- **Appliance builder:** **Administration › Appliance builder** builds an
+  appliance (disk + appliance file) from the Ubuntu baseline with an
+  application you choose, shows the console, and then offers it to **Publish
+  to all labs**. Setup and limits: [appliance-builder.md](appliance-builder.md).
 - **HTTPS certificate:** **Administration › HTTPS** shows the certificate in
   use and creates a self-signed one, a signing request (CSR) for a certificate
   authority, or installs an uploaded certificate and key. See

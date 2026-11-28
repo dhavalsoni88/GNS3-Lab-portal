@@ -118,6 +118,12 @@ systemctl daemon-reload
 if [[ -e /usr/local/libexec/gns3-lab-portal-apply-tls ]]; then   # HTTPS was set up with setup-https.sh
   install -m 0755 -o root -g root "$PORTAL_DIR/scripts/apply-tls.sh" /usr/local/libexec/gns3-lab-portal-apply-tls
 fi
+if [[ -e /etc/systemd/system/gns3-lab-portal-builder.service ]]; then   # builder was set up with setup-builder.sh
+  build_user=$(sed -n 's/^User=//p' /etc/systemd/system/gns3-lab-portal-builder.service)
+  sed -e "s|@BUILD_USER@|$build_user|g" -e "s|@PORTAL_DIR@|$PORTAL_DIR|g" "$PORTAL_DIR/deploy/systemd/gns3-lab-portal-builder.service" > /etc/systemd/system/gns3-lab-portal-builder.service
+  systemctl daemon-reload
+  systemctl restart gns3-lab-portal-builder.service
+fi
 
 step "Starting the portal"
 systemctl start "$SERVICE"

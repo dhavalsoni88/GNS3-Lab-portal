@@ -1,0 +1,8 @@
+{"label": "Splunk Enterprise", "description": "Splunk Enterprise installed from a .deb package you supply (download URL and SHA-256 from splunk.com).",
+ "packages": ["curl", "ca-certificates"], "ram": 8192, "cpus": 4, "disk_gb": 64, "host_prefix": "splunk",
+ "inputs": [
+  {"name": "SPLUNK_URL", "label": "Splunk .deb download URL (https)", "required": true},
+  {"name": "SPLUNK_SHA256", "label": "SHA-256 of that file", "required": true},
+  {"name": "SPLUNK_ADMIN_PASSWORD", "label": "Password for the Splunk admin user (8+ characters, kept in the image)", "required": true},
+  {"name": "SPLUNK_ACCEPT_LICENSE", "label": "I accept the Splunk software licence agreement", "required": true, "kind": "checkbox"}],
+ "usage": "Splunk Web http://<guest-ip>:8000 , user admin. The licence terms you accepted at build time apply to every clone."}

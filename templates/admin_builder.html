@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Appliance builder · GNS3 Lab Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Appliance builder</h1><p class="subtitle">Build a GNS3 appliance from the Ubuntu baseline: choose what to install, and the portal produces the disk (qcow2) and appliance file, then publishes it to every lab.</p></div>
+</div>
+
+<section class="card form-stack">
+  <h2>Before you build</h2>
+  <p style="margin:0">Baseline disks in <code>{{ builder_dir }}/baselines</code>:
+    {% if baselines %}{% for name in baselines %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    {% else %}<span class="error">none found.</span> Put a stopped, application-free Ubuntu server disk (.qcow2, cloud-init enabled) there. On a new server run <code>sudo bash scripts/setup-builder.sh</code> first.{% endif %}</p>
+  <p class="muted" style="margin:0">Finished disks go into the appliance store <code>{{ store.path }}</code>{% if store.exists %} ({{ store.free_bytes | storage_size }} free){% endif %}. A build needs a minute to start and often 10–40 minutes in all.</p>
+</section>
+
+<section class="card form-stack">
+  <h2>New appliance</h2>
+  <form class="form-stack" method="post" action="/admin/appliance-builder" enctype="multipart/form-data" data-builder-form>
+    <div class="form-row">
+      <label>Application<select name="recipe" required data-recipe>{% for id, recipe in recipes.items() %}<option value="{{ id }}" data-ram="{{ recipe.ram }}" data-cpus="{{ recipe.cpus }}" data-disk="{{ recipe.disk_gb }}">{{ recipe.label }}</option>{% endfor %}</select></label>
+      <label>Ubuntu baseline<select name="baseline" required>{% for name in baselines %}<option>{{ name }}</option>{% endfor %}</select></label>
+    </div>
+    {% for id, recipe in recipes.items() %}<p class="muted" style="margin:0" data-recipe-help="{{ id }}" hidden>{{ recipe.description }}</p>{% endfor %}
+    <div class="form-row">
+      <label>Appliance name<input name="name" required maxlength="64" placeholder="e.g. DVWA on Ubuntu"></label>
+      <label>Version<input name="version" maxlength="64" value="1"></label>
+    </div>
+    {% for id, recipe in recipes.items() if recipe.inputs %}
+    <fieldset class="form-stack" style="border:0;padding:0;margin:0" data-recipe-inputs="{{ id }}" disabled hidden>
+      {% for item in recipe.inputs %}
+      {% if item.kind == 'checkbox' %}<label><input type="checkbox" name="input_{{ item.name }}" value="yes" required> {{ item.label }}</label>
+      {% else %}<label>{{ item.label }}<input name="input_{{ item.name }}" {% if item.required %}required{% endif %} {% if 'PASSWORD' in item.name %}type="password" autocomplete="new-password"{% endif %} maxlength="2000"></label>{% endif %}
+      {% endfor %}
+    </fieldset>
+    {% endfor %}
+    <label>Extra Ubuntu packages <span class="muted">(optional, space or comma separated)</span><input name="packages" placeholder="e.g. nginx git"></label>
+    <label>Your own setup script <span class="muted">(optional; runs as root in the VM after the application, with bash)</span><textarea name="custom_script" rows="6" spellcheck="false" class="mono"></textarea></label>
+    <div class="form-row">
+      <label>CPUs<input name="cpus" type="number" min="1" max="16" data-cpus></label>
+      <label>Memory (MiB)<input name="ram" type="number" min="512" max="65536" data-ram></label>
+      <label>Disk (GiB)<input name="disk_gb" type="number" min="8" max="512" data-disk></label>
+    </div>
+    <div class="form-row">
+      <label>Baseline's login user<input name="login_user" value="labadmin" maxlength="32"></label>
+      <label>Icon <span class="muted">(PNG, optional; the application's own icon is used if it has one)</span><input type="file" name="icon" accept="image/png"></label>
+    </div>
+    <label>Notes <span class="muted">(shown to users under Usage: default login, first steps)</span><textarea name="notes" rows="3" maxlength="2000"></textarea></label>
+    <div><button class="primary big"{% if not baselines %} disabled{% endif %}>Start build</button></div>
+  </form>
+  <p class="muted" style="margin:0">The VM runs your script with internet access through the server. Only Platform Admins can build; the script is root in a throw-away VM, never on the server.</p>
+</section>
+
+<h2>Recent builds</h2>
+<div class="table-card">
+  <table class="data responsive">
+    <thead><tr><th scope="col">Appliance</th><th scope="col">Application</th><th scope="col">State</th><th scope="col">Started</th></tr></thead>
+    <tbody>{% for job in jobs %}
+      <tr>
+        <td class="primary-cell"><a href="/admin/appliance-builder/{{ job.id }}"><span class="cell-title">{{ job.name }}</span></a> <span class="muted">{{ job.version }}</span></td>
+        <td data-label="Application">{{ recipes[job.recipe].label if job.recipe in recipes else job.recipe }}</td>
+        <td data-label="State"><span class="pill {% if job.state == 'succeeded' %}ok{% elif job.state in ('failed', 'cancelled') %}bad{% else %}warn{% endif %}">{{ job.state }}</span>{% if job.state == 'queued' and now - job.created > 120 %} <span class="error">the builder service is not picking this up: systemctl status gns3-lab-portal-builder</span>{% endif %}</td>
+        <td data-label="Started"><time class="builder-time">{{ job.created }}</time></td>
+      </tr>{% else %}
+      <tr><td class="empty" colspan="4">No builds yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+(()=>{const select=document.querySelector('[data-recipe]');if(!select)return;
+function apply(){const id=select.value,option=select.selectedOptions[0];
+document.querySelectorAll('[data-recipe-help]').forEach(el=>el.hidden=el.dataset.recipeHelp!==id);
+document.querySelectorAll('[data-recipe-inputs]').forEach(el=>{const on=el.dataset.recipeInputs===id;el.hidden=!on;el.disabled=!on});
+for(const key of ['cpus','ram','disk']){const field=document.querySelector('[data-'+key+']:not(option):not(select)');if(field&&option)field.value=option.dataset[key]}}
+select.addEventListener('change',apply);apply();
+document.querySelectorAll('time.builder-time').forEach(el=>{const seconds=parseInt(el.textContent,10);if(seconds)el.textContent=new Date(seconds*1000).toLocaleString()})})();
+</script>{% endblock %}
