@@ -44,7 +44,9 @@ storage from the same place, and every action is audited.
   and a service running as the GNS3 user installs it in a QEMU/KVM VM, seals
   the image for cloning and writes the qcow2 and `.gns3a`. The build console
   streams live in the browser, and one click publishes the result to all labs.
-  Each application states what it needs (CPUs, memory, disk, CPU features,
+  Paste a GitHub repository, a `.deb` link or Ubuntu package names and the
+  builder drafts the application for you to review: requirements, install,
+  check and clean-up scripts. Each application states what it needs (CPUs, memory, disk, CPU features,
   licence); the builder checks the server first, and every image passes the
   application's own check and clean-up before it is published. Add applications
   as folders in `deploy/builder/recipes/` or import a zip, including profiles

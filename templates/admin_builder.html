@@ -5,6 +5,16 @@
   <div><h1>Appliance builder</h1><p class="subtitle">Build a GNS3 appliance on your Ubuntu baseline. Choose what to install; the portal makes the disk and the appliance file, then offers it to every lab.</p></div>
 </div>
 
+<section class="card form-stack">
+  <h2 style="margin:0">From a link or a package</h2>
+  <form class="form-row" method="post" action="/admin/appliance-builder/analyze" style="align-items:flex-end">
+    <label style="flex:1 1 480px">GitHub repository, .deb download link (a wget command works too), or Ubuntu package names
+      <input name="source" required maxlength="500" class="mono" placeholder="https://github.com/owner/repo"></label>
+    <button class="primary">Analyse</button>
+  </form>
+  <p class="muted" style="margin:0">The builder service reads the source and writes a draft application with its requirements and install, check and clean-up scripts. You review it, save it, then build it below.</p>
+</section>
+
 <form class="split" method="post" action="/admin/appliance-builder" enctype="multipart/form-data" data-builder-form>
   <div class="stack">
     <section class="card">
@@ -79,7 +89,7 @@
       <tbody>{% for job in jobs %}
         <tr>
           <td class="primary-cell"><a class="cell-title" href="/admin/appliance-builder/{{ job.id }}">{{ job.name }}</a> <span class="muted">{{ job.version }}</span></td>
-          <td data-label="Application">{{ recipes[job.recipe].label.split(' (')[0] if job.recipe in recipes else job.recipe }}</td>
+          <td data-label="Application">{% if job.kind == 'analyze' %}<span class="muted">Analysis</span>{% else %}{{ recipes[job.recipe].label.split(' (')[0] if job.recipe in recipes else job.recipe }}{% endif %}</td>
           <td data-label="State"><span class="pill {% if job.state == 'succeeded' %}ok{% elif job.state in ('failed', 'cancelled') %}bad{% elif job.state == 'running' %}warn{% else %}off{% endif %}">{{ job.state }}</span>{% if job.state == 'queued' and now - job.created > 120 %} <span class="error">The builder service is not picking this up: <code>systemctl status gns3-lab-portal-builder</code></span>{% endif %}</td>
           <td data-label="Started"><time class="builder-time">{{ job.created }}</time></td>
         </tr>{% else %}

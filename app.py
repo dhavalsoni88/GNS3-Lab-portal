@@ -2213,6 +2213,91 @@ async def builder_delete_recipe(request: Request, recipe_id: str):
     return builder_back(f"Deleted {recipe['label']}. Appliances already built from it are not affected.", "message")
 
 
+@app.post("/admin/appliance-builder/analyze")
+async def builder_analyze(request: Request, source: str = Form("")):
+    """Ask the builder service to turn a pasted link or package name into a draft application."""
+    appliance_admin(request)
+    try:
+        job = builder.make_analysis_job(source, audit_actor(request))
+        job_id = builder_store().create(job)
+    except ValueError as exc:
+        return builder_back(str(exc))
+    except OSError:
+        return builder_back("The portal cannot write to the builder folder. Run scripts/setup-builder.sh on the server.")
+    audit(audit_actor(request), "builder_source_analyzed", job["source"], {"kind": job["source_kind"]})
+    return RedirectResponse(f"/admin/appliance-builder/{job_id}", status_code=303)
+
+
+def recipe_form_context(request: Request, **values: Any) -> dict[str, Any]:
+    return {**base_context(request, "builder"), "notes": [], "source": "", "id_editable": False, **values}
+
+
+@app.get("/admin/appliance-builder/{job_id}/draft", response_class=HTMLResponse)
+async def builder_draft_page(request: Request, job_id: str):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    appliance_admin(request)
+    builder_job(job_id)
+    try:
+        draft = json.loads((builder_store().path(job_id) / "draft.json").read_text())
+    except (OSError, ValueError):
+        raise HTTPException(404, "This job has no draft. It may still be running or have failed.") from None
+    return templates.TemplateResponse(request, "admin_builder_draft.html", recipe_form_context(
+        request, title="Review the draft", recipe={**draft["settings"], "id": draft["id"], "hooks": draft["hooks"]},
+        notes=draft.get("notes", []), source=draft.get("source", ""), id_editable=True, action=f"/admin/appliance-builder/{job_id}/draft"))
+
+
+@app.get("/admin/appliance-builder/recipes/{recipe_id}/edit", response_class=HTMLResponse)
+async def builder_edit_recipe_page(request: Request, recipe_id: str):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    appliance_admin(request)
+    recipe = builder.load_recipes(BUILDER_DIR / "recipes").get(recipe_id)
+    if not recipe or recipe["source"] != "imported":
+        raise HTTPException(404, "Only imported or generated applications can be edited here. Built-in ones live in deploy/builder/recipes.")
+    return templates.TemplateResponse(request, "admin_builder_draft.html", recipe_form_context(
+        request, title=f"Edit {recipe['label']}", recipe=recipe, action=f"/admin/appliance-builder/recipes/{recipe_id}/edit"))
+
+
+async def save_recipe_form(request: Request, recipe_id: str, replace: bool, back: str) -> RedirectResponse:
+    form = await request.form()
+    values = {key: value for key, value in form.items() if isinstance(value, str)}
+    if not values.get("reviewed"):
+        return builder_back("Confirm that you read the scripts: they run as root in the build VM.", path=back)
+    folder = BUILDER_DIR / "recipes"
+    try:
+        settings = builder.settings_from_form(values)
+        hooks = {name: values.get(name, "") for name in builder.HOOKS}
+        if not hooks["seal-app.sh"].strip():
+            raise ValueError("seal-app.sh cannot be empty. Write true if nothing differs between clones.")
+        if not replace and recipe_id in builder.load_recipes(folder):
+            raise ValueError(f"An application called {recipe_id} already exists. Choose another id.")
+        await asyncio.to_thread(builder.save_recipe, folder, recipe_id, settings, hooks, b"", replace)
+    except ValueError as exc:
+        return builder_back(str(exc), path=back)
+    except OSError:
+        return builder_back("The portal cannot write to the builder's recipes folder. Run scripts/setup-builder.sh on the server.", path=back)
+    audit(audit_actor(request), "builder_recipe_saved", recipe_id, {"replaced": replace, "sha256": hashlib.sha256(json.dumps(hooks, sort_keys=True).encode()).hexdigest()})
+    return RedirectResponse(f"/admin/appliance-builder/recipes/{recipe_id}?message={quote_plus('Saved. Choose it under Application to build it.')}", status_code=303)
+
+
+@app.post("/admin/appliance-builder/{job_id}/draft")
+async def builder_save_draft(request: Request, job_id: str):
+    appliance_admin(request)
+    builder_job(job_id)
+    form = await request.form()
+    return await save_recipe_form(request, str(form.get("id", "")).strip(), False, f"/admin/appliance-builder/{job_id}/draft")
+
+
+@app.post("/admin/appliance-builder/recipes/{recipe_id}/edit")
+async def builder_save_recipe_edit(request: Request, recipe_id: str):
+    appliance_admin(request)
+    recipe = builder.load_recipes(BUILDER_DIR / "recipes").get(recipe_id)
+    if not recipe or recipe["source"] != "imported":
+        raise HTTPException(404, "Only imported or generated applications can be edited here.")
+    return await save_recipe_form(request, recipe_id, True, f"/admin/appliance-builder/recipes/{recipe_id}/edit")
+
+
 @app.get("/admin/appliance-builder/{job_id}", response_class=HTMLResponse)
 async def builder_job_page(request: Request, job_id: str):
     if AUTH_ENABLED and not active_portal_session(request):

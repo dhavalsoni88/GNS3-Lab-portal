@@ -35,7 +35,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
       - name: Check Python syntax
-        run: python -m compileall -q app.py portal_db.py portal_auth.py scripts tests
+        run: python -m compileall -q app.py portal_db.py portal_auth.py portal_tls.py portal_builder.py builder_sources.py scripts tests
       - name: Check shell scripts
         run: bash -n scripts/setup-mariadb.sh && bash -n scripts/migrate-snapshots-to-hdd-store.sh && bash -n scripts/upgrade.sh && shellcheck -S warning scripts/*.sh
       - name: Run tests

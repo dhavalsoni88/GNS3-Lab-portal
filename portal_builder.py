@@ -188,19 +188,65 @@ def import_recipe(raw: bytes, imported: Path, taken: set[str]) -> str:
         icon = member(icon_name, MAX_ICON) if icon_name else b""
         if icon and not icon.startswith(PNG_MAGIC):
             icon = b""   # an SVG or other format is skipped; GNS3 shows its default icon
-    settings.pop("custom")
+    save_recipe(imported, recipe_id, settings, hooks, icon)
+    return recipe_id
+
+
+def save_recipe(imported: Path, recipe_id: str, settings: dict[str, Any], hooks: dict[str, str], icon: bytes = b"", replace: bool = False) -> None:
+    """Write a checked recipe folder in one step: a half-written recipe is never visible to a build."""
+    settings = {key: value for key, value in recipe_settings(settings).items() if key != "custom"}
+    if not RECIPE_ID.match(recipe_id) or set(hooks) != set(HOOKS) or any(len(text.encode()) > MAX_SCRIPT for text in hooks.values()):
+        raise ValueError("A recipe needs a plain id and install-app.sh, check-app.sh and seal-app.sh of up to 64 KiB each.")
+    target = imported / recipe_id
+    if target.exists() and not replace:
+        raise ValueError(f"A recipe called {recipe_id} already exists.")
     staging = imported / f".{recipe_id}.{uuid.uuid4().hex}"
     staging.mkdir(parents=True)
     try:
         write_json(staging / "recipe.json", settings)
         for name, text in hooks.items():
-            (staging / name).write_text(text)
-        if icon:
-            (staging / "icon.png").write_bytes(icon)
-        os.rename(staging, imported / recipe_id)
+            (staging / name).write_text(text.replace("\r\n", "\n"))
+        icon_path = target / "icon.png"
+        if icon or (replace and icon_path.is_file()):
+            (staging / "icon.png").write_bytes(icon or icon_path.read_bytes())
+        if replace and target.exists():
+            old = imported / f".{recipe_id}.old.{uuid.uuid4().hex}"
+            os.rename(target, old)
+            os.rename(staging, target)
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            os.rename(staging, target)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    return recipe_id
+
+
+def settings_from_form(form: dict[str, str]) -> dict[str, Any]:
+    """The draft/edit form into recipe settings (recipe_settings then checks every value)."""
+    data: dict[str, Any] = {key: str(form.get(key, "")).strip() for key in ("label", "description", "usage", "license_url", "host_prefix")}
+    for key in ("cpus", "ram", "disk_gb", "min_cpus", "min_ram", "min_free_gib"):
+        try:
+            data[key] = int(str(form.get(key, "")).strip())
+        except ValueError:
+            raise ValueError(f"{key} must be a whole number.") from None
+    for key in ("cpu_flags", "services", "packages"):
+        data[key] = [item for item in re.split(r"[\s,]+", str(form.get(key, ""))) if item]
+    data["requires_license"] = bool(form.get("requires_license"))
+    data["ports"] = []
+    for item in re.split(r"[\s,]+", str(form.get("ports", ""))):
+        if item:
+            name, _, port = item.rpartition(":")
+            if not port.isdigit():
+                raise ValueError("Ports are written name:port, for example web:8080.")
+            data["ports"].append({"name": name or "port", "guest_port": int(port)})
+    return data
+
+
+def make_analysis_job(source: str, created_by: str) -> dict[str, Any]:
+    """A job for the builder service that turns a pasted link or package name into a draft recipe."""
+    import builder_sources   # imported here: builder_sources imports this module
+    kind, value = builder_sources.classify(source)
+    return {"kind": "analyze", "source": source.strip()[:500], "source_kind": kind, "name": value.rsplit("/", 1)[-1][:64] or "source",
+            "version": "", "recipe": "", "image": "", "created_by": created_by}
 
 
 def delete_recipe(imported: Path, recipe_id: str) -> None:

@@ -21,11 +21,19 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import builder_sources  # noqa: E402
 import portal_builder as pb  # noqa: E402
 
 BASE = pb.builder_dir()
 IMAGES = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or "/home/gns3/GNS3/images/QEMU")
 SSH_WAIT, RECIPE_WAIT, SEAL_WAIT = 600, 3600, 300
+
+
+# Printed in the console after the check, so the recipe's numbers can be tightened from a real run.
+MEASURE = """echo "Disk used: $(df -h --output=used / | tail -1 | tr -d ' ')  Memory used: $(free -m | awk '/^Mem:/{print $3}') MiB of $(free -m | awk '/^Mem:/{print $2}') MiB" || true
+echo "Listening TCP ports: $(ss -ltnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -nu | tr '\\n' ' ')" || true
+echo "Running services: $(systemctl list-units --type=service --state=running --no-legend --plain 2>/dev/null | awk '{print $1}' | tr '\\n' ' ')" || true
+"""
 
 
 class Cancelled(Exception):
@@ -202,7 +210,7 @@ class Build:
             raise RuntimeError("The install failed. The output above shows the failing command.")
         if recipe["hooks"]["check-app.sh"].strip():
             self.status("running", "Checking the application", 60)
-            if self.ssh(port, key, "sudo -n bash -s", stdin=self.stage("check.sh", recipe, [("check-app.sh", recipe["hooks"]["check-app.sh"])]), timeout=RECIPE_WAIT):
+            if self.ssh(port, key, "sudo -n bash -s", stdin=self.stage("check.sh", recipe, [("check-app.sh", recipe["hooks"]["check-app.sh"]), ("measure.sh", MEASURE)]), timeout=RECIPE_WAIT):
                 raise RuntimeError("The application check failed, so nothing was published. The output above shows why.")
         self.status("running", "Sealing the image", 70)
         seal = self.seal_stage(recipe)
@@ -238,10 +246,29 @@ class Build:
             self.status("failed", str(exc)[:300], 0)
         finally:
             self.stop_vm()
-            (IMAGES / (self.job["image"] + ".partial")).unlink(missing_ok=True)
+            if self.job.get("image"):
+                (IMAGES / (self.job["image"] + ".partial")).unlink(missing_ok=True)
             shutil.rmtree(self.work, ignore_errors=True)   # also removes the build key and the install payload
             self.log.close()
             (self.folder / "queued").unlink(missing_ok=True)
+
+
+class Analysis(Build):
+    """Turn a pasted source into draft.json in the job folder; nothing is installed or published."""
+
+    def build(self) -> None:
+        self.status("running", "Looking at the source", 10)
+        self.work.mkdir(parents=True, mode=0o700)
+        recipes = pb.load_recipes(BASE / "recipes")
+        builtin = {key for key, recipe in recipes.items() if recipe["source"] == "built-in"}
+        try:
+            result = builder_sources.draft(self.job["source"], self.work, self.say, set(recipes), builtin)
+        except Exception as exc:   # network, HTTP and package errors all end here, with their message
+            raise RuntimeError(f"Could not make a draft: {exc}") from exc
+        for note in result["notes"]:
+            self.say("note: " + note)
+        pb.write_json(self.folder / "draft.json", result)
+        self.status("succeeded", f"Draft ready: {result['settings']['label']}. Review it and save it as an application.", 100)
 
 
 def recover() -> None:
@@ -267,7 +294,8 @@ def main() -> None:
         waiting = sorted((p for p in (BASE / "jobs").glob("*/queued") if pb.JOB_ID.match(p.parent.name)), key=lambda p: p.stat().st_mtime)
         for marker in waiting[:1]:
             try:
-                Build(marker.parent).execute()
+                kind = json.loads((marker.parent / "job.json").read_text()).get("kind")
+                (Analysis if kind == "analyze" else Build)(marker.parent).execute()
             except (OSError, ValueError, KeyError) as exc:
                 print("job", marker.parent.name, "could not start:", exc, flush=True)
                 marker.unlink(missing_ok=True)

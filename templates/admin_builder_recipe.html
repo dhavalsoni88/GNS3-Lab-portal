@@ -4,7 +4,7 @@
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/admin/appliance-builder">Appliance builder</a> / {{ recipe.label }}</nav>
 <div class="page-head">
   <div><h1>{{ recipe.label }}</h1><p class="subtitle">{{ recipe.description }}</p></div>
-  {% if recipe.source == 'imported' %}<form method="post" action="/admin/appliance-builder/recipes/{{ recipe.id }}/delete" onsubmit="return confirm('Delete this imported application? Appliances already built from it stay.')"><button class="danger">Delete</button></form>{% endif %}
+  {% if recipe.source == 'imported' %}<div class="row-actions"><a class="button" href="/admin/appliance-builder/recipes/{{ recipe.id }}/edit">Edit</a><form method="post" action="/admin/appliance-builder/recipes/{{ recipe.id }}/delete" onsubmit="return confirm('Delete this imported application? Appliances already built from it stay.')"><button class="danger">Delete</button></form></div>{% endif %}
 </div>
 
 <div class="split">

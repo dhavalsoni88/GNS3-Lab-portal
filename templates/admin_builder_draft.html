@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} · Appliance builder{% endblock %}
+{% block content %}
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/admin/appliance-builder">Appliance builder</a> / {{ title }}</nav>
+<div class="page-head">
+  <div><h1>{{ title }}</h1>{% if source %}<p class="subtitle mono" style="word-break:break-all">{{ source }}</p>{% endif %}</div>
+</div>
+{% if notes %}
+<section class="card">
+  <h2>What was found</h2>
+  <ul style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px">{% for note in notes %}<li>{{ note }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+<form class="split" method="post" action="{{ action }}">
+  <div class="stack">
+    {% for name in ['install-app.sh', 'check-app.sh', 'seal-app.sh'] %}
+    <section class="card form-stack">
+      <h2 class="mono" style="margin:0">{{ name }}</h2>
+      <p class="muted" style="margin:0">{% if name == 'install-app.sh' %}Installs the application (root, in the build VM).{% elif name == 'check-app.sh' %}Must succeed after the install and before sealing, or nothing is published.{% else %}Removes what must differ between clones: generated IDs, keys, accounts, data.{% endif %}</p>
+      <textarea name="{{ name }}" rows="{{ 14 if name == 'install-app.sh' else 8 }}" spellcheck="false" class="mono" aria-label="{{ name }}">{{ recipe.hooks.get(name, '') }}</textarea>
+    </section>
+    {% endfor %}
+  </div>
+  <aside>
+    <section class="card form-stack">
+      <h2>Application</h2>
+      {% if id_editable %}<label>Id<input name="id" value="{{ recipe.id }}" required pattern="[a-z0-9][a-z0-9-]{0,40}" maxlength="41"></label>{% else %}<p class="mono" style="margin:0">{{ recipe.id }}</p>{% endif %}
+      <label>Name<input name="label" value="{{ recipe.label }}" required maxlength="80"></label>
+      <label>Description<textarea name="description" rows="2" maxlength="300">{{ recipe.description }}</textarea></label>
+      <div class="form-row"><label>CPUs<input name="cpus" type="number" min="1" max="16" value="{{ recipe.cpus }}"></label><label>at least<input name="min_cpus" type="number" min="1" max="16" value="{{ recipe.min_cpus }}"></label></div>
+      <div class="form-row"><label>Memory (MiB)<input name="ram" type="number" min="512" max="65536" value="{{ recipe.ram }}"></label><label>at least<input name="min_ram" type="number" min="512" max="65536" value="{{ recipe.min_ram }}"></label></div>
+      <div class="form-row"><label>Disk (GiB)<input name="disk_gb" type="number" min="8" max="512" value="{{ recipe.disk_gb }}"></label><label>Free space (GiB)<input name="min_free_gib" type="number" min="0" max="1024" value="{{ recipe.min_free_gib }}"></label></div>
+      <label>CPU features <span class="muted">(space separated, e.g. avx sse4_2)</span><input name="cpu_flags" value="{{ recipe.cpu_flags | join(' ') }}" class="mono"></label>
+      <label>Ubuntu packages installed first<input name="packages" value="{{ recipe.packages | join(' ') }}" class="mono"></label>
+      <label>Services stopped before sealing<input name="services" value="{{ recipe.services | join(' ') }}" class="mono"></label>
+      <label>Ports <span class="muted">(name:port)</span><input name="ports" value="{% for p in recipe.ports %}{{ p.name }}:{{ p.guest_port }} {% endfor %}" class="mono"></label>
+      <label class="inline-check"><input type="checkbox" name="requires_license" value="yes" {% if recipe.requires_license %}checked{% endif %}> Building needs licence acceptance</label>
+      <label>Licence link<input name="license_url" value="{{ recipe.license_url }}" placeholder="https://"></label>
+      <label>Usage text<textarea name="usage" rows="3" maxlength="2000">{{ recipe.usage }}</textarea></label>
+      <input type="hidden" name="host_prefix" value="{{ recipe.host_prefix }}">
+      <label class="inline-check"><input type="checkbox" name="reviewed" value="yes" required> I read the three scripts. They run as root in the build VM.</label>
+      <button class="primary big">Save application</button>
+    </section>
+  </aside>
+</form>
+{% endblock %}

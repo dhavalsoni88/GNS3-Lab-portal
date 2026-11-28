@@ -74,6 +74,33 @@ free, and a CPU with `avx`, `sse4_2` and `aes`.
 script**. A clone that keeps another clone's IDs causes trouble that is hard to trace, so the build will
 not start without one. Write `true` if the software keeps no per-machine identity.
 
+### From a link or a package
+
+At the top of **Appliance builder**, paste one of these and click **Analyse**:
+
+| You paste | What the builder service does |
+|---|---|
+| A `.deb` download link, or the `wget`/`curl` command that fetches it | Downloads it, pins its SHA-256, and reads its name, version, architecture (amd64 only), dependencies, installed size and the systemd services it ships |
+| A GitHub repository link | Pins the default branch's current commit and picks, in this order: a `.deb` in the latest release (as above), a `compose.yaml`/`docker-compose.yml` (installs Docker and runs it as a service, with the ports it publishes), a `Dockerfile` (builds and runs it, with its `EXPOSE` ports), or a top-level `install.sh`/`setup.sh`. The repository's licence decides whether acceptance is asked |
+| Ubuntu package names | Installs them with apt; their services are checked after the install and stopped before sealing |
+
+The result is a **draft**: requirements (CPUs, memory, disk and free space are estimated from the package
+or repository size), the three scripts, and notes on what was found and what to check. Review it, edit
+anything, tick that you read the scripts, and **Save application**. It then appears under *Application*
+for a normal build. Saved applications can be edited later.
+
+What a source cannot tell, the draft leaves to you:
+
+- **Vendor minimums and CPU features.** A `.deb` does not say that Splunk needs 12 GiB and `avx`. Use the
+  vendor's system requirements, or a built-in recipe when one exists (the notes say so).
+- **Per-clone clean-up.** The generated `seal-app.sh` does nothing until you add what must differ between
+  clones.
+- **A real check.** Generated checks test that packages are installed, services run and ports answer.
+  An `install.sh` repository gets a placeholder check to replace.
+
+Every build prints what it **measured** in the VM after the check: disk and memory used, listening ports
+and running services. Use these to tighten the application's numbers.
+
 ### Import an application
 
 **Applications › Import an application** takes a zip that holds either:
