@@ -5,6 +5,21 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.1.1 — 2026-11-28
+
+### Fixes
+
+- **Published appliances no longer make GNS3 warn "Could not find '' in the
+  Qemu binaries list".** The template now carries the path of the QEMU program
+  for its CPU (for example `/usr/bin/qemu-system-x86_64`), taken from the GNS3
+  server. The review page shows it, and says so when the server has none.
+  An appliance published with v9.1.0 shows the warning once: open its
+  template, choose the QEMU binary and click OK, or remove the template and
+  publish it again.
+- The default template name no longer repeats the version when the
+  appliance's name already contains it ("WebGoat … gold-v1 gold-v1").
+- **The template name can be edited** on the review page before publishing.
+
 ## v9.1.0 — 2026-11-28
 
 Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`

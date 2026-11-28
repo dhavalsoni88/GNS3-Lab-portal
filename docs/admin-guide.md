@@ -93,7 +93,11 @@ Use **Lab Operator** for people who only start and stop labs, and
        the store, so large disks don't time out.
      - **Does not match:** the store already has a different file with that
        name. It is never replaced; rename or remove it on the server first.
-  3. Add **Notes** if you like (default login, first-boot steps). Users see
+  3. Change the **Template name** if you like (it is how the appliance is
+     listed in GNS3; the default is the appliance's name, with its version
+     added when the name does not already contain it). The page also shows
+     the QEMU program the template will use, found on the GNS3 server.
+     Add **Notes** if you like (default login, first-boot steps). Users see
      them under **Usage** when they configure the appliance in GNS3. The
      appliance file's own `usage` text is filled in for you.
   4. **Publish to all labs.** Moving large disks and registering the

@@ -1270,12 +1270,30 @@ def appliance_template(appliance: Any, version_name: str = "") -> tuple[dict[str
     if appliance["qemu"].get("arch"):
         template["platform"] = str(appliance["qemu"]["arch"])
     category = {"multilayer_switch": "switch"}.get(str(appliance.get("category")), str(appliance.get("category")))
-    template.update(slots, template_type="qemu", compute_id=APPLIANCE_COMPUTE_ID,
-                    name=f"{appliance['name']} {version.get('name', '')}".strip()[:200],
+    base, version_label = str(appliance["name"]), str(version.get("name", ""))
+    default_name = base if not version_label or version_label.lower() in base.lower() else f"{base} {version_label}"
+    template.update(slots, template_type="qemu", compute_id=APPLIANCE_COMPUTE_ID, name=default_name.strip()[:200],
                     category=category if category in {"router", "switch", "guest", "firewall"} else "guest")
     listed = {str(item.get("filename")): item for item in appliance.get("images") or [] if isinstance(item, dict)}
     images = {name: {"md5": listed.get(name, {}).get("md5sum"), "size": int(listed.get(name, {}).get("filesize") or 0) or None} for name in slots.values()}
     return template, images, str(appliance.get("usage") or appliance.get("notes") or "")[:2000]
+
+
+async def qemu_binary_for(arch: str) -> str | None:
+    """GNS3's path for the QEMU program that emulates this CPU (for example /usr/bin/qemu-system-x86_64).
+
+    A template without it makes the GNS3 app warn "Could not find '' in the Qemu binaries list".
+    """
+    wanted = f"qemu-system-{arch}"
+    try:
+        listed = await gns3("GET", f"/v2/computes/{quote(APPLIANCE_COMPUTE_ID, safe='')}/qemu/binaries") or []
+    except HTTPException:
+        listed = []
+    for item in listed:
+        path = str(item.get("path", "")) if isinstance(item, dict) else ""
+        if os.path.basename(path) == wanted:
+            return path
+    return shutil.which(wanted)
 
 
 def appliance_store_info() -> dict[str, Any]:
@@ -1368,8 +1386,8 @@ def move_image(source: Path, destination: Path, expected: dict[str, Any], job: d
             portal_logger.warning("appliance_original_not_removed path=%s", source)
 
 
-async def run_appliance_job(job: dict[str, Any], draft: dict[str, Any], states: list[dict[str, Any]], notes: str) -> None:
-    template, moved = dict(draft["template"]), []
+async def run_appliance_job(job: dict[str, Any], draft: dict[str, Any], states: list[dict[str, Any]], notes: str, name: str) -> None:
+    template, moved = {**draft["template"], "name": name}, []
     try:
         for index, state in enumerate(states):
             if state["state"] == "found":
@@ -1378,6 +1396,8 @@ async def run_appliance_job(job: dict[str, Any], draft: dict[str, Any], states: 
         if notes.strip():
             template["usage"] = notes.strip()[:2000]  # shown under Usage when the appliance is configured in GNS3
         job.update(progress_percent=95, message="Registering the appliance in GNS3…")
+        if binary := await qemu_binary_for(str(template.get("platform") or "x86_64")):
+            template["qemu_path"] = binary
         if any(item.get("name") == template["name"] for item in await gns3("GET", "/v2/templates") or []):
             raise ValueError(f"A template named {template['name']} already exists. Nothing was changed.")
         await gns3("POST", "/v2/templates", json=template)
@@ -2002,7 +2022,8 @@ async def appliance_review_page(request: Request, draft_id: str):
         taken = False
     return templates.TemplateResponse(request, "admin_appliance_review.html", {
         **base_context(request, "appliances"), "draft_id": draft_id, "draft": draft, "states": states, "store": await asyncio.to_thread(appliance_store_info),
-        "can_publish": all(item["state"] in {"ready", "found"} for item in states) and not taken, "name_taken": taken,
+        "can_publish": all(item["state"] in {"ready", "found"} for item in states), "name_taken": taken,
+        "qemu_binary": await qemu_binary_for(str(draft["template"].get("platform") or "x86_64")),
         "job_id": job_id if job_id in app.state.appliance_jobs else "",
     })
 
@@ -2052,21 +2073,24 @@ async def upload_appliance_image(request: Request, draft_id: str, filename: str)
 
 
 @app.post("/admin/appliances/{draft_id}/publish")
-async def publish_appliance(request: Request, draft_id: str, notes: str = Form("")):
+async def publish_appliance(request: Request, draft_id: str, notes: str = Form(""), name: str = Form("")):
     appliance_admin(request)
     draft = appliance_draft(draft_id)
     back = f"/admin/appliances/{draft_id}"
+    name = name.strip() or draft["template"]["name"]
+    if len(name) > 200:
+        return RedirectResponse(f"{back}?error={quote_plus('Use a template name of 200 characters or fewer.')}", status_code=303)
     states = await asyncio.to_thread(appliance_image_states, draft["images"])
     if blocked := [item["name"] for item in states if item["state"] not in {"ready", "found"}]:
         return RedirectResponse(f"{back}?error={quote_plus('Not ready: ' + ', '.join(blocked))}", status_code=303)
-    if any(item.get("name") == draft["template"]["name"] for item in await gns3("GET", "/v2/templates") or []):
-        return RedirectResponse(f"{back}?error={quote_plus('A template with that name already exists. Nothing was changed.')}", status_code=303)
+    if any(item.get("name") == name for item in await gns3("GET", "/v2/templates") or []):
+        return RedirectResponse(f"{back}?error={quote_plus('A template with that name already exists. Choose another name.')}", status_code=303)
     if any(job.get("status") == "working" and job.get("draft_id") == draft_id for job in app.state.appliance_jobs.values()):
         return RedirectResponse(back, status_code=303)
     job_id = uuid.uuid4().hex
     prune_jobs(app.state.appliance_jobs)
     app.state.appliance_jobs[job_id] = job = {"draft_id": draft_id, "audit_actor": audit_actor(request), "actor": current_user(request), "status": "working", "progress_percent": 0, "message": "Starting…"}
-    spawn(run_appliance_job(job, draft, states, notes))
+    spawn(run_appliance_job(job, draft, states, notes, name))
     return RedirectResponse(f"{back}?job={job_id}", status_code=303)
 
 
