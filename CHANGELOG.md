@@ -5,7 +5,7 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
-## v9.4.2 — 2026-11-28
+## v9.4.3 — 2026-11-28
 
 ### Fixes
 
@@ -15,6 +15,12 @@ are kept under **Upgrade notes**. For upgrading an installation, see
   one-time key and a temporary sudo rule, which sealing removes. It is passed to the builder in a file
   only it and the portal can read, deleted when the build starts, and never logged or stored with the
   job. The cloud-init seed disk is no longer used.
+- Docs and messages no longer ask for a cloud-init-enabled baseline: it needs OpenSSH with password
+  login and a user with sudo. A baseline copied in as root must be given to `gns3`.
+
+## v9.4.2 — 2026-11-28
+
+### Fixes
 
 - **A build no longer fails when the baseline disk is larger than the application's disk size** (for
   example a 32 GiB baseline and DVWA's 16 GiB). The builder used to ask `qemu-img` to shrink the disk,
