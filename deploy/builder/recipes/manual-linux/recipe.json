@@ -1,0 +1,3 @@
+{"label": "Manual: Linux", "description": "Set the VM up yourself in its screen: Ubuntu desktop or server, from a baseline or an installer ISO.",
+ "interactive": true, "os": "linux", "cpus": 2, "ram": 4096, "disk_gb": 32, "min_cpus": 1, "min_ram": 1024, "min_free_gib": 8, "host_prefix": "linux",
+ "usage": "Linux appliance configured by hand in the appliance builder."}

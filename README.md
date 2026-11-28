@@ -46,7 +46,9 @@ storage from the same place, and every action is audited.
   streams live in the browser, and one click publishes the result to all labs.
   Paste a GitHub repository, a `.deb` link or Ubuntu package names and the
   builder drafts the application for you to review: requirements, install,
-  check and clean-up scripts. Each application states what it needs (CPUs, memory, disk, CPU features,
+  check and clean-up scripts. Every build shows the VM's screen live in the
+  browser, and **Manual Linux** and **Manual Windows** builds are set up by hand
+  in that screen, from a baseline disk or an installer ISO. Each application states what it needs (CPUs, memory, disk, CPU features,
   licence); the builder checks the server first, and every image passes the
   application's own check and clean-up before it is published. Add applications
   as folders in `deploy/builder/recipes/` or import a zip, including profiles
@@ -150,7 +152,7 @@ sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
 
 ## Project status
 
-The current release is **v9.4.0**: requirement-aware appliance recipes with import; HTTPS and certificate management from the
+The current release is **v9.2.0**: requirement-aware appliance recipes with import; HTTPS and certificate management from the
 portal, the appliance library and builder, lab limits, and the graphite
 interface with a Light, Dark or System theme, on top of the v9.0 MariaDB, roles,
 Active Directory, SSO and tamper-resistant audit foundation. Automated tests

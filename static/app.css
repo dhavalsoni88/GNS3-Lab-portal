@@ -265,6 +265,18 @@ table.data th[scope=row]{font-weight:400;color:var(--muted);width:200px;border-b
 tr.active-backup-row{--backup-progress:0deg}
 tr.active-backup-row .progress-ring{background:conic-gradient(var(--ink) var(--backup-progress),var(--line) 0)}
 
+/* Build VM screen (noVNC) */
+.screen-card{background:var(--term);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column}
+.screen-card:fullscreen{border-radius:0}
+.screen-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgb(237 237 237 / .08);color:var(--term-ink)}
+.screen-bar .spacer{flex:1}.screen-bar .pill{color:var(--term-ink)}
+.screen-bar button{min-height:32px;background:transparent;color:var(--term-ink);border-color:rgb(237 237 237 / .16)}
+.screen-bar button:hover{background:rgb(237 237 237 / .08);color:#fff}
+.screen-bar .primary{background:#ededed;color:#141415;border-color:#ededed}
+.screen{aspect-ratio:4 / 3;width:100%;background:#000;outline:none}
+.screen-card:fullscreen .screen{aspect-ratio:auto;flex:1}
+.screen:focus-visible{box-shadow:inset 0 0 0 2px #ededed}
+
 /* Build console and step list */
 .term{margin:0;background:var(--term);color:var(--term-ink);border-radius:var(--radius);padding:16px 20px;font:12.5px/20px var(--mono);max-height:68vh;min-height:320px;overflow:auto;white-space:pre-wrap;word-break:break-word}
 .steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}

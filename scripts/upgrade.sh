@@ -121,7 +121,8 @@ fi
 if [[ -e /etc/systemd/system/gns3-lab-portal-builder.service ]]; then   # builder was set up with setup-builder.sh
   build_user=$(sed -n 's/^User=//p' /etc/systemd/system/gns3-lab-portal-builder.service)
   sed -e "s|@BUILD_USER@|$build_user|g" -e "s|@PORTAL_DIR@|$PORTAL_DIR|g" "$PORTAL_DIR/deploy/systemd/gns3-lab-portal-builder.service" > /etc/systemd/system/gns3-lab-portal-builder.service
-  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 /var/lib/gns3-lab-portal-builder/recipes   # added in v9.4
+  install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0755 /var/lib/gns3-lab-portal-builder/recipes   # added in v9.2
+  install -d -o "$build_user" -g "$build_user" -m 0755 /var/lib/gns3-lab-portal-builder/isos   # installer ISOs for manual builds
   systemctl daemon-reload
   systemctl restart gns3-lab-portal-builder.service
 fi

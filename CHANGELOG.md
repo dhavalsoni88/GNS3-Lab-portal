@@ -5,158 +5,94 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
-## v9.4.5 — 2026-11-28
-
-### Fixes
-
-- **Builds no longer fail with "Could not get lock /var/lib/apt/lists/lock".** Right after boot, Ubuntu's
-  automatic updates (apt-daily, unattended-upgrades) hold apt's locks. Before every install, check and
-  seal step the builder now pauses their timers for that boot only (the image keeps them enabled), waits
-  up to 30 minutes for an update that is already running, and lets apt wait up to 10 minutes for its
-  locks. That apt setting is removed when the image is sealed.
-
-## v9.4.4 — 2026-11-28
-
-### Changed
-
-- **Appliance builder layout.** The name, baseline, login and size fields sit on an aligned grid with
-  hints under their own field, so the password hint no longer pushes the row out of line. Application
-  cards list their requirements in short pieces that wrap between values. All three steps share one
-  spacing, the custom appliance's scripts sit in their own section, and the icon picker shares a row.
-- **Applications can be removed from the list.** Imported applications have **Delete** in the list
-  (appliances already built from them stay in the library). Built-in ones have **Hide**: they leave the
-  list and the build form, are listed under the table, and can be shown again. A hidden built-in keeps
-  its name, so an import cannot take it.
-
-## v9.4.3 — 2026-11-28
-
-### Fixes
-
-- **The builder logs in with the baseline user's password** (as the original kits did), asked for on
-  the build form. Ubuntu installs usually tell cloud-init to ignore seed disks, so the one-time SSH key
-  never reached the VM and builds stopped at "Permission denied". The password is used once to add a
-  one-time key and a temporary sudo rule, which sealing removes. It is passed to the builder in a file
-  only it and the portal can read, deleted when the build starts, and never logged or stored with the
-  job. The cloud-init seed disk is no longer used.
-- Docs and messages no longer ask for a cloud-init-enabled baseline: it needs OpenSSH with password
-  login and a user with sudo. A baseline copied in as root must be given to `gns3`.
-
-## v9.4.2 — 2026-11-28
-
-### Fixes
-
-- **A build no longer fails when the baseline disk is larger than the application's disk size** (for
-  example a 32 GiB baseline and DVWA's 16 GiB). The builder used to ask `qemu-img` to shrink the disk,
-  which it refuses. Now it only grows a disk; a larger baseline keeps its size, and the console says so.
-
-## v9.4.1 — 2026-11-28
-
-### Fixes
-
-- **Analysing GitHub repositories whose compose file is in a subfolder**, such as OWASP crAPI
-  (`deploy/docker/docker-compose.yml`). Compose files up to three folders down are found, test and
-  example folders are skipped, and the service runs in that folder so its `.env` applies.
-- Ports written as `"${LISTEN_IP:-127.0.0.1}:8888:80"` are read, and such variables are set to `0.0.0.0`
-  in the service, so lab machines can reach the application instead of only the VM itself.
-- Memory and CPUs are sized from the compose file's container limits (`deploy.resources.limits`).
-- The generated check now fails when a published port never opens (it used to wait and pass).
-
-## v9.4.0 — 2026-11-28
-
-Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh` (it creates the new
-`/var/lib/gns3-lab-portal-builder/recipes` folder). Design: [ADR-0001](docs/adr/0001-appliance-recipes-from-generator-profiles.md).
-
-### Changed
-
-- **Applications state what they need.** A recipe declares minimum CPUs and memory, free disk, required
-  CPU features (for example Splunk's `avx sse4_2 aes`), licence, and the services to stop. The form
-  refuses less than the minimum, and the builder checks the server before copying anything.
-- **Install, check, clean up.** Every recipe has `install-app.sh`, `check-app.sh` and `seal-app.sh`. A
-  failing check stops the build before anything is published; the check runs again before sealing.
-- **Splunk is built the safe way** (from the supplied Splunk kit): installed and never started on the
-  golden image; each clone creates its own administrator, GUID and data with
-  `sudo initialize-splunk-lab --accept-license`. The admin password field is gone, and so is the
-  password that v9.3.0 wrote into the image. Rebuild any Splunk appliance made with v9.3.0.
-- **Custom appliances need a clean-up script** before they can be built (`true` if nothing differs per clone).
-- **Licence acceptance** is a checkbox on the form for recipes that need one, and is audited.
-- WebGoat clears student data and DVWA empties its database when sealing.
-
-### New
-
-- **From a link or a package.** Paste a GitHub repository, a `.deb` download link (a `wget` command
-  works too) or Ubuntu package names. The builder service reads the source and writes a draft
-  application: requirements estimated from the package or repository, the install, check and clean-up
-  scripts (pinned by SHA-256 or commit; GitHub repositories run from a `.deb` release, docker compose, a
-  Dockerfile or `install.sh`), and notes on what to review. Review, save, build.
-- Imported and generated applications can be **edited** in the portal.
-- Every build prints what it **measured** in the VM: disk and memory used, listening ports, running services.
-- **Import an application** from a zip: `recipe.json` with its scripts, or an ubuntu-appliance-generator
-  profile as generated. Imported recipes can be read (**Scripts**) and deleted; built-in ones cannot be
-  replaced. Each build keeps a copy of the scripts it ran.
-
-## v9.3.0 — 2026-11-28
-
-Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then run
-`sudo bash scripts/setup-builder.sh` once to use the builder
-([docs/appliance-builder.md](docs/appliance-builder.md)).
-
-### New
-
-- **Appliance builder.** **Administration › Appliance builder** builds a GNS3
-  appliance on top of your Ubuntu baseline: choose an application (WebGoat,
-  DVWA, Splunk, or custom packages and your own script), CPU, memory, disk,
-  icon and notes. A separate service running as the GNS3 user clones the
-  baseline, installs the application in a QEMU/KVM VM, seals the image for
-  cloning, and writes the qcow2 into GNS3's image folder together with the
-  `.gns3a`. The build console streams live in the portal, and one click sends
-  the result through the normal appliance review to every lab.
-- Applications are folders under `deploy/builder/recipes/`; add one without
-  changing code.
-- Published appliances can carry an icon (uploaded to GNS3 as a symbol).
-- **New look: graphite.** Quiet graphite surfaces in light and dark, no colour accent: the primary action is the ink colour, and colour is used only for status (a small link-state dot) and errors. System fonts, line icons in the sidebar, weights 400 and 500, sentence-case labels, a visible focus ring.
-- **Navigation grouped by task:** Workspace, Appliances (Library, Builder), Access (Users, Roles & groups, Identity providers), Server (Status, HTTPS).
-- **Labs:** one toolbar for status filter, owner filter and search; each lab shows a dot per node (green when running); *Open* is a secondary button so *New lab* is the one primary action.
-- **Appliance builder** is a three-step form with a live summary; the build page shows a terminal-style console beside a step list. **HTTPS** shows the certificate on top and the three methods as tabs. **Appliance library** puts the list first and import and store details beside it.
-- **Theme switch:** Light, Dark or System (follows the operating system) from the top bar and the sign-in page; the choice is remembered in the browser.
-- **Sign-in page** shows what the product does, with a small topology drawing.
-- Not yet run against a real KVM server: the VM steps are tested only with
-  stub tools. Please report what the console shows on the first build.
-
 ## v9.2.0 — 2026-11-28
 
-Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then, to
-use the new feature, `sudo bash scripts/setup-https.sh --fqdn <your name>`
-once ([docs/https.md](docs/https.md)).
+Everything after v9.1.0 in one release. Upgrade with `git pull` followed by
+`sudo bash scripts/upgrade.sh`. Then, for the features you want, once each:
+`sudo bash scripts/setup-https.sh --fqdn <your name>` ([docs/https.md](docs/https.md)) and
+`sudo bash scripts/setup-builder.sh` (add `--cockpit` to watch build VMs in Cockpit;
+[docs/appliance-builder.md](docs/appliance-builder.md)).
 
-### New
+### New: HTTPS from the portal
 
-- **HTTPS from the portal.** **Administration › HTTPS** shows the current
-  certificate (names, issuer, expiry, fingerprint) and can create a
-  self-signed certificate for a chosen FQDN and Subject Alternative Names
-  (DNS names, wildcards, IP addresses), create a signing request (CSR) whose
-  private key never leaves the server, install the certificate a CA returns,
-  or upload a certificate and key (PEM or .pfx). Keys are checked against the
-  certificate; a private key is refused over plain HTTP. A replaced
-  certificate can be put back with one click.
-- `scripts/setup-https.sh` installs Nginx for HTTPS (HTTP redirects to HTTPS)
-  and a small root-owned helper that reloads Nginx after a new certificate is
-  installed, so the portal itself never runs as root. If Nginx rejects a new
-  certificate, the previous one is restored automatically.
+- **Administration › HTTPS** shows the current certificate (names, issuer, expiry, fingerprint) and
+  can create a self-signed certificate for a chosen FQDN and Subject Alternative Names (DNS names,
+  wildcards, IP addresses), create a signing request (CSR) whose private key never leaves the server,
+  install the certificate a CA returns, or upload a certificate and key (PEM or .pfx). Keys are checked
+  against the certificate; a private key is refused over plain HTTP. A replaced certificate can be put
+  back with one click.
+- `scripts/setup-https.sh` installs Nginx for HTTPS (HTTP redirects to HTTPS) and a small root-owned
+  helper that reloads Nginx after a new certificate is installed, so the portal never runs as root. If
+  Nginx rejects a certificate, the previous one is restored automatically. An existing Nginx site for
+  the portal, and its `sites-enabled` link, are moved aside with `--replace-existing`.
 
-## v9.1.1 — 2026-11-28
+### New: appliance builder
+
+- **Administration › Appliance builder** builds a GNS3 appliance on your Ubuntu baseline. A separate
+  service running as the GNS3 user (`gns3-lab-portal-builder`, set up with `setup-builder.sh`) clones
+  the baseline, boots it with QEMU/KVM, installs the application, checks it, seals the image for
+  cloning (new machine ID, SSH host keys and host name per clone), and writes the qcow2 into GNS3's
+  image folder with its `.gns3a`. The build console streams live with a step list, and one click sends
+  the result through the appliance review to every lab, with its icon.
+- **Applications state what they need:** minimum CPUs and memory, free disk, CPU features (Splunk's
+  `avx sse4_2 aes`, for example), licence and services. The form refuses less than the minimum, and the
+  builder checks the server's CPUs, free memory, CPU features and free space before copying anything.
+- **Install, check, clean up.** Every application has `install-app.sh`, `check-app.sh` and
+  `seal-app.sh`. A failing check stops the build before anything is published; the check runs again
+  before sealing. Each build keeps a copy of the scripts it ran, and prints what it measured in the VM
+  (disk and memory used, listening ports, running services).
+- **Built in:** WebGoat (pinned and checksum verified; student data cleared at sealing), DVWA (empty
+  database per clone), Splunk Enterprise, and Custom (your packages and scripts; a clean-up script is
+  required). Splunk follows the supplied Splunk kit: installed and never started on the golden image,
+  and each clone creates its own administrator, GUID and data with
+  `sudo initialize-splunk-lab --accept-license`.
+- **From a link or a package.** Paste a GitHub repository, a `.deb` download link (a `wget` command
+  works too) or Ubuntu package names, and the builder drafts the application for you to review:
+  requirements, scripts (pinned by SHA-256 or commit) and notes. GitHub repositories install from a
+  `.deb` release, docker compose (also in subfolders, such as OWASP crAPI's `deploy/docker`, sized from
+  its container limits and opened to the lab network when it binds to 127.0.0.1), a Dockerfile or
+  `install.sh`.
+- **Import** an application as a zip (`recipe.json` with its scripts, or an ubuntu-appliance-generator
+  profile). Imported and drafted applications can be read, edited and deleted; built-in ones can be
+  hidden and shown again. Design: [ADR-0001](docs/adr/0001-appliance-recipes-from-generator-profiles.md).
+- **Licence acceptance** is a checkbox on the form for applications that need one, and is audited.
+- **Access to the build VM:** the build form asks for the baseline user's password. It is used once to
+  add a one-time SSH key and a temporary sudo rule, both removed when sealing; it is passed to the
+  builder in a file only the two services can read, deleted when the build starts, and never logged.
+- **Robust on real baselines:** the disk is only ever grown (a larger baseline keeps its size), and
+  every step waits for Ubuntu's automatic updates to release apt's locks.
+- **The VM's screen in the browser.** Every build page shows the build VM's screen live (noVNC, served
+  by the portal) with keyboard and mouse, Ctrl+Alt+Del and full screen: Linux text consoles and
+  desktops, and Windows. The screen listens only on 127.0.0.1; the portal relays it over a websocket to
+  signed-in appliance administrators of this site, and only while the build runs.
+- **Build by hand: Manual Linux and Manual Windows.** Start from a baseline disk or from an installer
+  ISO (in the builder's new `isos` folder) with an empty disk, set the VM up in its screen, then
+  **Seal and finish** (Linux, sealed over SSH with the optional password) or run Sysprep and shut down
+  (Windows); the build publishes when the VM is off. Windows VMs and appliances use SATA, e1000, a USB
+  tablet and a local-time clock.
+- **Cockpit** (optional): with `setup-builder.sh --cockpit` each build VM runs as a temporary libvirt
+  VM, `gns3-build-<job>`, that also appears in Cockpit's Virtual machines page.
+- The Nginx files forward websockets (needed for the screen); re-run `setup-https.sh` on an existing
+  server to update its site.
+
+### New: interface
+
+- **Graphite look** in light and dark, with no colour accent: the primary action is the ink colour, and
+  colour only marks status (a small link-state dot) and errors. System fonts, line icons, weights 400
+  and 500, sentence-case labels, a visible focus ring.
+- **Theme switch:** Light, Dark or System, in the top bar and on the sign-in page.
+- **Navigation grouped by task:** Workspace, Appliances (Library, Builder), Access, Server (Status, HTTPS).
+- **Labs:** one toolbar for filters and search, and a dot per node (green when running).
+- The appliance library, builder, build page, HTTPS page and sign-in page were laid out again.
 
 ### Fixes
 
-- **Published appliances no longer make GNS3 warn "Could not find '' in the
-  Qemu binaries list".** The template now carries the path of the QEMU program
-  for its CPU (for example `/usr/bin/qemu-system-x86_64`), taken from the GNS3
-  server. The review page shows it, and says so when the server has none.
-  An appliance published with v9.1.0 shows the warning once: open its
-  template, choose the QEMU binary and click OK, or remove the template and
-  publish it again.
-- The default template name no longer repeats the version when the
-  appliance's name already contains it ("WebGoat … gold-v1 gold-v1").
-- **The template name can be edited** on the review page before publishing.
+- **Published appliances no longer make GNS3 warn "Could not find '' in the Qemu binaries list".** The
+  template carries the path of the QEMU program for its CPU, taken from the GNS3 server. An appliance
+  published with v9.1.0 shows the warning once: open its template, choose the QEMU binary and click OK,
+  or publish it again.
+- The default template name no longer repeats the version, and the template name can be edited before
+  publishing.
 
 ## v9.1.0 — 2026-11-28
 

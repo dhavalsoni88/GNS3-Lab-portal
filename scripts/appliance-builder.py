@@ -12,6 +12,7 @@ import secrets
 import json
 import os
 import shlex
+from xml.sax.saxutils import escape
 import shutil
 import signal
 import socket
@@ -26,7 +27,11 @@ import portal_builder as pb  # noqa: E402
 
 BASE = pb.builder_dir()
 IMAGES = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or "/home/gns3/GNS3/images/QEMU")
+# With libvirt the build VM appears in Cockpit's Virtual machines page with its graphical console (setup-builder.sh --cockpit).
+LIBVIRT = os.getenv("PORTAL_BUILDER_LIBVIRT", "").strip().lower() in ("1", "true", "yes")
+VIRSH = ["virsh", "-q", "-c", "qemu:///system"]
 SSH_WAIT, RECIPE_WAIT, SEAL_WAIT = 600, 3600, 300
+INTERACTIVE_WAIT = 24 * 3600   # how long a manual build may stay open in the console
 
 
 # Ubuntu starts apt-daily and unattended-upgrades right after boot, and they hold apt's locks. Pause their
@@ -52,6 +57,49 @@ class Cancelled(Exception):
     pass
 
 
+def domain_xml(name: str, title: str, ram: int, cpus: int, disk: Path, port: int, windows: bool = False, iso: Path | None = None) -> str:
+    """A transient libvirt VM equal to the plain QEMU one: same CPU, disk and user-mode network with SSH on 127.0.0.1:port,
+    plus a VNC screen on 127.0.0.1 that Cockpit shows in the browser. It disappears when it powers off."""
+    return f"""<domain type='kvm'>
+  <name>{name}</name>
+  <title>{escape(title)}</title>
+  <description>GNS3 Lab Portal appliance build. Removed automatically when it powers off.</description>
+  <memory unit='MiB'>{ram}</memory>
+  <vcpu>{cpus}</vcpu>
+  <os><type arch='x86_64' machine='{"q35" if windows else "pc"}'>hvm</type><boot dev='hd'/><boot dev='cdrom'/></os>
+  <features><acpi/><apic/></features>
+  <cpu mode='host-passthrough'/>
+  <clock offset='{"localtime" if windows else "utc"}'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <devices>
+    <disk type='file' device='disk'><driver name='qemu' type='qcow2'/><source file='{escape(str(disk))}'/><target dev='{"sda" if windows else "vda"}' bus='{"sata" if windows else "virtio"}'/></disk>
+{f"    <disk type='file' device='cdrom'><driver name='qemu' type='raw'/><source file='{escape(str(iso))}'/><target dev='sdb' bus='sata'/><readonly/></disk>" + chr(10) if iso else ""}    <interface type='user'>
+      <backend type='passt'/>
+{f"      <portForward proto='tcp' address='127.0.0.1'><range start='{port}' to='22'/></portForward>" + chr(10) if port else ""}      <model type='{"e1000e" if windows else "virtio"}'/>
+    </interface>
+    <graphics type='vnc' autoport='yes' listen='127.0.0.1'><listen type='address' address='127.0.0.1'/></graphics>
+    <video><model type='virtio'/></video>
+    <input type='tablet' bus='usb'/>
+    <serial type='pty'/>
+    <console type='pty'/>
+  </devices>
+</domain>
+"""
+
+
+def free_vnc_display() -> int:
+    """A VNC display number whose port (5900 + n) is free on 127.0.0.1."""
+    for display in range(100, 400):
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", 5900 + display))
+                return display
+            except OSError:
+                continue
+    raise RuntimeError("No free VNC port between 6000 and 6299 for the build VM's screen.")
+
+
 def ssh_banner(port: int) -> bool:
     """True once sshd in the VM answers (its greeting starts with SSH-)."""
     try:
@@ -72,6 +120,8 @@ def host_facts() -> tuple[int, int, set[str]]:
 
 def preflight(job: dict, recipe: dict) -> None:
     """Refuse a build this server cannot hold, before any disk is copied or VM started."""
+    if LIBVIRT and not shutil.which("virsh"):
+        raise RuntimeError("PORTAL_BUILDER_LIBVIRT is on but libvirt is not installed. Run sudo bash scripts/setup-builder.sh --cockpit.")
     cpus, memory, flags = host_facts()
     if job["cpus"] > cpus:
         raise RuntimeError(f"The build VM needs {job['cpus']} CPUs; this server has {cpus}.")
@@ -100,12 +150,17 @@ class Build:
             self.password = ""
         secret.unlink(missing_ok=True)
         self.qemu: subprocess.Popen | None = None
+        self.vnc_port = 0   # the VM's screen on 127.0.0.1, relayed to the browser by the portal while the build runs
+        self.domain = ""   # set once a libvirt VM is created
 
     def say(self, text: str) -> None:
         self.log.write((text.rstrip("\n") + "\n").encode())
 
     def status(self, state: str, message: str, percent: int) -> None:
-        pb.write_json(self.folder / "status.json", {"state": state, "message": message, "percent": percent})
+        data = {"state": state, "message": message, "percent": percent}
+        if state == "running" and self.vnc_port and self.vm_running():
+            data["vnc_port"] = self.vnc_port
+        pb.write_json(self.folder / "status.json", data)
         self.say(f"== {message}")
 
     def check_cancel(self) -> None:
@@ -164,20 +219,43 @@ class Build:
                  ("seal-ubuntu.sh", "rm -rf /root/.gns3-build\n" + f"export HOST_PREFIX={shlex.quote(recipe['host_prefix'])}\n" + (pb.ROOT / "deploy" / "builder" / "seal.sh").read_text())]
         return self.stage("seal.sh", recipe, steps)
 
-    def boot(self, disk: Path, port: int) -> None:
+    def boot(self, disk: Path, port: int, iso: Path | None = None) -> None:
+        """Start the VM with a screen on 127.0.0.1. port forwards SSH (0: none); iso boots an installer on an empty disk."""
         job = self.job
-        command = ["qemu-system-x86_64", "-enable-kvm", "-cpu", "host", "-machine", "pc", "-m", str(job["ram"]), "-smp", str(job["cpus"]),
-                   "-drive", f"file={disk},if=virtio,format=qcow2",
-                   "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:22", "-device", "virtio-net-pci,netdev=n0",
-                   "-display", "none", "-serial", f"file:{self.work / 'serial.log'}", "-monitor", "none"]
+        windows = job["recipe_snapshot"].get("os") == "windows"
+        if LIBVIRT:
+            os.chmod(self.work, 0o711)   # libvirt's QEMU user must reach the disk; the key and scripts inside stay 0600
+            xml = self.work / "domain.xml"
+            name = f"gns3-build-{job['id'][:12]}"
+            xml.write_text(domain_xml(name, f"GNS3 build: {job['name']} {job.get('version', '')}".strip(), job["ram"], job["cpus"], disk, port, windows, iso))
+            self.run(*VIRSH, "create", str(xml))
+            self.domain = name
+            shown = subprocess.run([*VIRSH, "vncdisplay", name], capture_output=True, text=True).stdout.strip()
+            if shown.rpartition(":")[2].isdigit():
+                self.vnc_port = 5900 + int(shown.rpartition(":")[2])
+            self.say(f"The VM is {self.domain}; its screen is on this page and in Cockpit (Virtual machines).")
+            return
+        display = free_vnc_display()
+        command = ["qemu-system-x86_64", "-enable-kvm", "-cpu", "host", "-machine", "q35" if windows else "pc", "-m", str(job["ram"]), "-smp", str(job["cpus"])]
+        if windows:   # hardware Windows has drivers for out of the box
+            command += ["-drive", f"file={disk},if=none,id=d0,format=qcow2", "-device", "ide-hd,drive=d0,bus=ide.0",
+                        "-netdev", "user,id=n0", "-device", "e1000,netdev=n0", "-rtc", "base=localtime"]
+        else:
+            command += ["-drive", f"file={disk},if=virtio,format=qcow2",
+                        "-netdev", "user,id=n0" + (f",hostfwd=tcp:127.0.0.1:{port}-:22" if port else ""), "-device", "virtio-net-pci,netdev=n0"]
+        if iso:
+            command += ["-drive", f"file={iso},if=none,id=cd0,media=cdrom,readonly=on", "-device", f"ide-cd,drive=cd0,bus=ide.{2 if windows else 1}"]
+        command += ["-boot", "order=cd", "-vga", "std", "-usb", "-device", "usb-tablet", "-vnc", f"127.0.0.1:{display}",
+                    "-serial", f"file:{self.work / 'serial.log'}", "-monitor", "none"]
         self.say("$ " + " ".join(shlex.quote(part) for part in command))
         self.qemu = subprocess.Popen(command, stdout=self.log, stderr=subprocess.STDOUT)
+        self.vnc_port = 5900 + display
 
     def wait_ssh(self, port: int, key: Path) -> None:
         deadline = time.monotonic() + SSH_WAIT
         while time.monotonic() < deadline:
             self.check_cancel()
-            if self.qemu.poll() is not None:
+            if not self.vm_running():
                 raise RuntimeError("The build VM stopped before SSH came up. Check that /dev/kvm is usable and the baseline boots.")
             if ssh_banner(port):
                 return
@@ -217,13 +295,23 @@ echo "Build access added for {user}."
 
     def finish_vm(self) -> None:
         deadline = time.monotonic() + SEAL_WAIT
-        while self.qemu.poll() is None:
+        while self.vm_running():
             self.check_cancel()
             if time.monotonic() > deadline:
                 raise RuntimeError("The VM did not power off after sealing.")
             time.sleep(2)
 
+    def vm_running(self) -> bool:
+        if self.domain:   # a transient domain is gone once it powers off, so any error means not running
+            done = subprocess.run([*VIRSH, "domstate", self.domain], capture_output=True, text=True)
+            return done.returncode == 0 and done.stdout.strip() not in ("shut off", "crashed")
+        return bool(self.qemu) and self.qemu.poll() is None
+
     def stop_vm(self) -> None:
+        if self.domain:
+            if self.vm_running():
+                subprocess.run([*VIRSH, "destroy", self.domain], stdout=self.log, stderr=subprocess.STDOUT)
+            return
         if self.qemu and self.qemu.poll() is None:
             self.qemu.terminate()
             try:
@@ -234,7 +322,6 @@ echo "Build access added for {user}."
     def build(self) -> None:
         job, folder = self.job, self.folder
         recipe = job["recipe_snapshot"]
-        baseline = BASE / "baselines" / job["baseline"]
         target = IMAGES / job["image"]
         if target.exists():
             raise RuntimeError(f"{target} already exists. Build with another name or version; an existing disk is never replaced.")
@@ -242,43 +329,88 @@ echo "Build access added for {user}."
         preflight(job, recipe)
         self.work.mkdir(parents=True, mode=0o700)
         disk, key = self.work / "disk.qcow2", self.work / "key"
-        if not self.password:
+        interactive = bool(recipe.get("interactive"))
+        if not self.password and not interactive:
             raise RuntimeError("No password for the baseline user was given with this build.")
-        self.status("running", "Cloning the Ubuntu baseline", 5)
-        self.run("qemu-img", "convert", "-O", "qcow2", str(baseline), str(disk))
-        self.run("qemu-img", "check", str(disk))
-        current = json.loads(subprocess.run(["qemu-img", "info", "--output=json", str(disk)], capture_output=True, text=True, check=True).stdout)["virtual-size"]
-        if job["disk_gb"] * 1024**3 > current:
-            self.run("qemu-img", "resize", str(disk), f"{job['disk_gb']}G")   # the guest grows its filesystem on boot
-        else:   # never shrink: that would cut off the baseline's filesystem
-            self.say(f"Disk kept at {current // 1024**3} GiB: the baseline is already that size or larger, and a disk is never shrunk.")
-        self.status("running", "Preparing temporary build access", 12)
-        self.run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "gns3-lab-builder", "-f", str(key))
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
+        iso = BASE / "isos" / job["iso"] if job.get("iso") else None
+        if iso:
+            self.status("running", "Creating an empty disk for the installer", 5)
+            self.run("qemu-img", "create", "-q", "-f", "qcow2", str(disk), f"{job['disk_gb']}G")
+        else:
+            self.status("running", "Cloning the baseline", 5)
+            self.run("qemu-img", "convert", "-O", "qcow2", str(BASE / "baselines" / job["baseline"]), str(disk))
+            self.run("qemu-img", "check", str(disk))
+            current = json.loads(subprocess.run(["qemu-img", "info", "--output=json", str(disk)], capture_output=True, text=True, check=True).stdout)["virtual-size"]
+            if job["disk_gb"] * 1024**3 > current:
+                self.run("qemu-img", "resize", str(disk), f"{job['disk_gb']}G")   # the guest grows its filesystem on boot
+            else:   # never shrink: that would cut off the baseline's filesystem
+                self.say(f"Disk kept at {current // 1024**3} GiB: the baseline is already that size or larger, and a disk is never shrunk.")
+        linux = recipe.get("os", "linux") == "linux"
+        port = 0
+        if linux and self.password:
+            self.status("running", "Preparing temporary build access", 12)
+            self.run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "gns3-lab-builder", "-f", str(key))
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
         self.status("running", "Starting the build VM", 18)
-        self.boot(disk, port)
-        self.status("running", "Waiting for the VM to accept SSH", 25)
-        self.wait_ssh(port, key)
-        self.status("running", "Logging in with the baseline user's password", 30)
-        self.bootstrap(port, key)
-        self.status("running", "Installing the application (this can take a while)", 35)
-        if self.ssh(port, key, "sudo -n bash -s", stdin=self.install_stage(recipe), timeout=RECIPE_WAIT):
-            raise RuntimeError("The install failed. The output above shows the failing command.")
-        if recipe["hooks"]["check-app.sh"].strip():
-            self.status("running", "Checking the application", 60)
-            if self.ssh(port, key, "sudo -n bash -s", stdin=self.stage("check.sh", recipe, [("check-app.sh", recipe["hooks"]["check-app.sh"]), ("measure.sh", MEASURE)]), timeout=RECIPE_WAIT):
-                raise RuntimeError("The application check failed, so nothing was published. The output above shows why.")
-        self.status("running", "Sealing the image", 70)
-        seal = self.seal_stage(recipe)
-        before = (folder / "console.log").stat().st_size
-        self.ssh(port, key, "sudo -n bash -s", stdin=seal, timeout=SEAL_WAIT)   # the VM powers off, so SSH ends abruptly
+        self.boot(disk, port, iso)
+        if interactive:
+            self.configure_by_hand(recipe, port, key)
+        else:
+            self.status("running", "Waiting for the VM to accept SSH", 25)
+            self.wait_ssh(port, key)
+            self.status("running", "Logging in with the baseline user's password", 30)
+            self.bootstrap(port, key)
+            self.status("running", "Installing the application (this can take a while)", 35)
+            if self.ssh(port, key, "sudo -n bash -s", stdin=self.install_stage(recipe), timeout=RECIPE_WAIT):
+                raise RuntimeError("The install failed. The output above shows the failing command.")
+            if recipe["hooks"]["check-app.sh"].strip():
+                self.status("running", "Checking the application", 60)
+                if self.ssh(port, key, "sudo -n bash -s", stdin=self.stage("check.sh", recipe, [("check-app.sh", recipe["hooks"]["check-app.sh"]), ("measure.sh", MEASURE)]), timeout=RECIPE_WAIT):
+                    raise RuntimeError("The application check failed, so nothing was published. The output above shows why.")
+            self.status("running", "Sealing the image", 70)
+            self.seal_linux(port, key, recipe)
+        self.publish(disk, recipe)
+
+    def seal_linux(self, port: int, key: Path, recipe: dict) -> None:
+        before = (self.folder / "console.log").stat().st_size
+        self.ssh(port, key, "sudo -n bash -s", stdin=self.seal_stage(recipe), timeout=SEAL_WAIT)   # the VM powers off, so SSH ends abruptly
         self.finish_vm()
-        with (folder / "console.log").open("rb") as handle:
+        with (self.folder / "console.log").open("rb") as handle:
             handle.seek(before)
             if b"GNS3-SEAL-COMPLETE" not in handle.read():
                 raise RuntimeError("Sealing did not complete; the disk was not published.")
+
+    def configure_by_hand(self, recipe: dict, port: int, key: Path) -> None:
+        """A manual build: the administrator works in the VM's screen, then either clicks Seal and finish (Linux,
+        with the login password) or shuts the VM down (Windows after Sysprep, or Linux they prepared themselves)."""
+        if recipe.get("os") == "windows":
+            how = "When it is ready, run C:\\Windows\\System32\\Sysprep\\sysprep.exe /generalize /oobe /shutdown. The build continues when Windows shuts down."
+        elif port:
+            how = "When it is ready, click Seal and finish (the builder seals Ubuntu over SSH), or shut the VM down yourself."
+        else:
+            how = "When it is ready, shut the VM down from its console (no password was given, so the builder cannot seal it)."
+        self.status("running", "Configure the VM in its screen on this page. " + how, 40)
+        finish, deadline = self.folder / "finish", time.monotonic() + INTERACTIVE_WAIT
+        while self.vm_running():
+            self.check_cancel()
+            if finish.exists():
+                finish.unlink()
+                if port:
+                    self.status("running", "Sealing the image", 70)
+                    self.wait_ssh(port, key)
+                    self.bootstrap(port, key)
+                    self.seal_linux(port, key, {**recipe, "services": [], "hooks": {"install-app.sh": "", "check-app.sh": "", "seal-app.sh": "true"}})
+                    return
+                self.say("Seal and finish needs the login password; shut the VM down from its console instead.")
+            if time.monotonic() > deadline:
+                raise RuntimeError("The build stayed open for 24 hours without finishing.")
+            time.sleep(2)
+        self.say("The VM shut down; publishing the disk as it is." + ("" if recipe.get("os") == "windows" else " It was not sealed by the builder."))
+
+    def publish(self, disk: Path, recipe: dict) -> None:
+        job, folder, target = self.job, self.folder, IMAGES / self.job["image"]
         self.status("running", "Compressing and publishing the disk", 80)
         if shutil.disk_usage(IMAGES).free < disk.stat().st_size:
             raise RuntimeError(f"Not enough free space in {IMAGES}.")
@@ -345,7 +477,7 @@ def recover() -> None:
 
 def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    for name in ("jobs", "work", "baselines"):
+    for name in ("jobs", "work", "baselines", "isos"):
         (BASE / name).mkdir(parents=True, exist_ok=True)
     recover()
     print("builder service ready, watching", BASE / "jobs", flush=True)

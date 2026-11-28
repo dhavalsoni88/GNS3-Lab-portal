@@ -22,7 +22,7 @@ from typing import Any
 from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
-from fastapi import File, FastAPI, Form, HTTPException, Request, UploadFile, status
+from fastapi import File, FastAPI, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -83,6 +83,7 @@ GNS3_ROOT = GNS3_PROJECTS_DIR.parent if GNS3_PROJECTS_DIR else Path("/home/gns3/
 GNS3_IMAGES_DIR = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or GNS3_ROOT / "images" / "QEMU").expanduser()
 APPLIANCE_SEARCH_DIRS = tuple(Path(item.strip()).expanduser() for item in os.getenv("PORTAL_APPLIANCE_SEARCH_DIRS", str(GNS3_ROOT / "images")).split(",") if item.strip())
 BUILDER_DIR = builder.builder_dir()
+BUILDER_LIBVIRT = os.getenv("PORTAL_BUILDER_LIBVIRT", "").strip().lower() in ("1", "true", "yes")   # build VMs visible in Cockpit
 TLS_DIR = Path(os.getenv("PORTAL_TLS_DIR", str(BASE_DIR / "data" / "tls"))).expanduser()
 # Written by the root helper that reloads Nginx (scripts/apply-tls.sh); the portal only reads it.
 TLS_STATUS_FILE = Path(os.getenv("PORTAL_TLS_STATUS_FILE", "/run/gns3-lab-portal-tls.status"))
@@ -2141,7 +2142,7 @@ async def builder_page(request: Request):
         return redirect_login()
     appliance_admin(request)
     return templates.TemplateResponse(request, "admin_builder.html", {
-        **base_context(request, "builder"), "recipes": builder.load_recipes(BUILDER_DIR / "recipes"), "baselines": builder.baselines(BUILDER_DIR),
+        **base_context(request, "builder"), "recipes": builder.load_recipes(BUILDER_DIR / "recipes"), "baselines": builder.baselines(BUILDER_DIR), "isos": builder.isos(BUILDER_DIR),
         "hidden_recipes": {key: value for key, value in builder.load_recipes(BUILDER_DIR / "recipes", include_hidden=True).items() if key in builder.hidden_builtins(BUILDER_DIR / "recipes")},
         "jobs": await asyncio.to_thread(builder_store().all), "builder_dir": str(BUILDER_DIR), "store": await asyncio.to_thread(appliance_store_info),
         "now": int(time.time()),
@@ -2155,7 +2156,7 @@ async def builder_start(request: Request):
     values = {key: value for key, value in form.items() if isinstance(value, str)}
     recipes = builder.load_recipes(BUILDER_DIR / "recipes")
     try:
-        job = builder.make_job(values, recipes, builder.baselines(BUILDER_DIR), audit_actor(request))
+        job = builder.make_job(values, recipes, builder.baselines(BUILDER_DIR), audit_actor(request), builder.isos(BUILDER_DIR))
         store = await asyncio.to_thread(appliance_store_info)
         need = recipes[job["recipe"]]["min_free_gib"]
         if store["exists"] and store["free_bytes"] < need * 1024**3:
@@ -2165,7 +2166,8 @@ async def builder_start(request: Request):
         if any(item.get("image") == job["image"] and item["state"] not in builder.FINISHED for item in builder_store().all(200)):
             raise ValueError("A build for that name and version is already waiting or running.")
         password = values.get("login_password", "")
-        if not password or len(password) > 256 or any(c in password for c in "\r\n\x00"):
+        needed = not recipes[job["recipe"]]["interactive"]   # a manual build only uses it for Seal and finish
+        if (needed and not password) or len(password) > 256 or any(c in password for c in "\r\n\x00"):
             raise ValueError("Enter the password of the baseline's login user (one line, up to 256 characters). It is used once to log in to the build VM and is not stored.")
         upload = form.get("icon")
         icon = await upload.read(builder.MAX_ICON + 1) if isinstance(upload, UploadFile) and upload.filename else b""
@@ -2174,7 +2176,7 @@ async def builder_start(request: Request):
     except (ValueError, OSError) as exc:
         message = str(exc) if isinstance(exc, ValueError) else "The portal cannot write to the builder folder. Run scripts/setup-builder.sh on the server."
         return builder_back(message)
-    audit(audit_actor(request), "build_appliance_requested", job["name"], {"recipe": job["recipe"], "baseline": job["baseline"], "image": job["image"], "license_accepted": job["license_accepted"], "cpus": job["cpus"], "ram": job["ram"]})
+    audit(audit_actor(request), "build_appliance_requested", job["name"], {"recipe": job["recipe"], "baseline": job["baseline"], "iso": job["iso"], "image": job["image"], "license_accepted": job["license_accepted"], "cpus": job["cpus"], "ram": job["ram"]})
     return RedirectResponse(f"/admin/appliance-builder/{job_id}", status_code=303)
 
 
@@ -2338,7 +2340,8 @@ async def builder_job_page(request: Request, job_id: str):
         return redirect_login()
     appliance_admin(request)
     job = builder_job(job_id)
-    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": job.get("recipe_snapshot") or {}})
+    cockpit = f"https://{request.url.hostname}:9090/machines" if BUILDER_LIBVIRT and job.get("kind") != "analyze" else ""
+    return templates.TemplateResponse(request, "admin_builder_job.html", {**base_context(request, "builder"), "job": job, "recipe": job.get("recipe_snapshot") or {}, "cockpit_url": cockpit})
 
 
 @app.get("/admin/appliance-builder/{job_id}/log")
@@ -2346,7 +2349,68 @@ async def builder_log(request: Request, job_id: str, offset: int = 0):
     appliance_admin(request)
     job = builder_job(job_id)
     text, new_offset = await asyncio.to_thread(builder_store().read_log, job_id, offset)
-    return JSONResponse({"text": text, "offset": new_offset, "state": job["state"], "message": job["message"], "percent": job["percent"]})
+    return JSONResponse({"text": text, "offset": new_offset, "state": job["state"], "message": job["message"], "percent": job["percent"],
+                         "screen": job["state"] == "running" and bool(job["vnc_port"])})
+
+
+@app.post("/admin/appliance-builder/{job_id}/finish")
+async def builder_finish(request: Request, job_id: str):
+    """Manual Linux build: ask the builder to seal Ubuntu over SSH and publish."""
+    appliance_admin(request)
+    if builder_job(job_id)["state"] == "running":
+        (builder_store().path(job_id) / "finish").touch()
+        audit(audit_actor(request), "build_appliance_finish", job_id, {})
+    return RedirectResponse(f"/admin/appliance-builder/{job_id}", status_code=303)
+
+
+@app.websocket("/admin/appliance-builder/{job_id}/screen")
+async def builder_screen(websocket: WebSocket, job_id: str):
+    """Relay the build VM's screen (VNC on 127.0.0.1) to noVNC in the browser.
+
+    Only a signed-in appliance administrator, from this site, and only to the port the builder reported for a
+    running build: the relay can never be pointed at another address or port.
+    """
+    origin = websocket.headers.get("origin", "")
+    allowed = {value for value in (websocket.headers.get("host", ""), urlsplit(PORTAL_PUBLIC_URL).netloc) if value}
+    try:
+        if urlsplit(origin).netloc not in allowed:
+            raise HTTPException(403, "Cross-site request refused.")
+        if AUTH_ENABLED and not active_portal_session(websocket):   # type: ignore[arg-type] - only session and app are used
+            raise HTTPException(401, "Sign in again.")
+        appliance_admin(websocket)   # type: ignore[arg-type]
+        job = builder_job(job_id)
+        if job["state"] != "running" or not job["vnc_port"]:
+            raise HTTPException(409, "The build VM is not running.")
+        reader, writer = await asyncio.open_connection("127.0.0.1", job["vnc_port"])
+    except (HTTPException, OSError):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept(subprotocol="binary" if "binary" in websocket.scope.get("subprotocols", []) else None)
+    audit(audit_actor(websocket), "build_appliance_screen_opened", job_id, {})   # type: ignore[arg-type]
+
+    async def to_vm() -> None:
+        while True:
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                return
+            writer.write(message.get("bytes") or (message.get("text") or "").encode())
+            await writer.drain()
+
+    async def to_browser() -> None:
+        while data := await reader.read(65536):
+            await websocket.send_bytes(data)
+
+    tasks = [asyncio.create_task(to_vm()), asyncio.create_task(to_browser())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        writer.close()
+        try:
+            await websocket.close()
+        except (RuntimeError, WebSocketDisconnect):
+            pass
 
 
 @app.post("/admin/appliance-builder/{job_id}/cancel")

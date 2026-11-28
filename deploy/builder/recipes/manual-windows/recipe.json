@@ -1,0 +1,3 @@
+{"label": "Manual: Windows", "description": "Install or set up Windows client or server in its screen, then generalise it with Sysprep.",
+ "interactive": true, "os": "windows", "cpus": 2, "ram": 4096, "disk_gb": 64, "min_cpus": 2, "min_ram": 2048, "min_free_gib": 20, "host_prefix": "windows",
+ "usage": "Windows appliance configured by hand in the appliance builder and generalised with Sysprep. Each clone runs Windows setup (OOBE) on first boot. Windows licensing applies to every clone."}
