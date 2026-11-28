@@ -5,20 +5,22 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
-## v9.1.0 — Unreleased
+## v9.1.0 — 2026-11-28
 
-- **Make template no longer times out.** Copying a large backup into the
-  template archive ran inside the web request, so a proxy gave up with
-  "504 Gateway Time-out" after a minute. It now runs in the background and
-  the lab's Backups tab shows a progress bar; a backup that is already a
-  template is refused before any copy starts.
+Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`
+([docs/upgrading.md](docs/upgrading.md)). It applies migration
+`004_lab_limit` and restarts the portal. To publish appliances, give the
+portal write access to GNS3's image folder (see the installation guide); the
+script says so if it lacks it.
+
+### New
 
 - **Lab limit per user.** Each user may own 2 labs by default; administrators
   change it per user (**Labs allowed** on the Users page). It is checked
   before any lab is created: empty, from a backup or template, or uploaded.
   Platform Admins and Lab Managers are not limited. Database migration
   `004_lab_limit` adds the column and records limit changes in the change
-  history; `scripts/upgrade.sh` applies it.
+  history.
 - **Publish appliances to every lab** (**Administration › Appliances**,
   Platform Admins). Choose a QEMU `.gns3a` file and the portal shows, per
   disk, whether the server already has it:
@@ -34,23 +36,17 @@ are kept under **Upgrade notes**. For upgrading an installation, see
   Publishing runs in the background with a progress bar and registers the
   template; optional **Notes** appear under **Usage** in GNS3. Existing
   templates and images are never replaced. QEMU options in an appliance file
-  are limited to a safe list, because they run on the GNS3 server. The
-  portal service user needs write access to the store (see the installation
-  guide); `scripts/upgrade.sh` says so if it lacks it.
-- **Review fixes:**
-  - The lab limit can no longer be bypassed by sending requests at the same
-    time, and labs deleted directly in GNS3 no longer count against it.
-  - The Nginx sample forwards `Host $http_host`, so sign-in works on a
-    non-standard port; `Origin: null` and the other unsafe methods (PUT,
-    PATCH, DELETE) are covered by the cross-site check.
-  - `scripts/setup-mariadb.sh` restarts MariaDB only when its audit settings
-    changed, instead of on every upgrade. CI runs `shellcheck` on the scripts.
-  - Background jobs keep a reference to their task; half-copied template
-    folders left by a crash are removed at start-up; the Templates page no
-    longer asks GNS3 about every lab; an empty "Labs allowed" box no longer
-    shows a raw error.
+  are limited to a safe list, because they run on the GNS3 server.
+- **Make template no longer times out.** Copying a large backup into the
+  template archive ran inside the web request, so a proxy gave up with
+  "504 Gateway Time-out" after a minute. It now runs in the background and
+  the lab's Backups tab shows a progress bar; a backup that is already a
+  template is refused before any copy starts.
+- **Releases are tagged automatically.** When `version` in `pyproject.toml`
+  is new on `main`, GitHub creates the `vX.Y.Z` tag and a release from this
+  changelog.
 
-## v9.0.1 — Unreleased
+### Fixes
 
 - `scripts/upgrade.sh` installs requirements with `python -m pip`. A `.venv`
   copied from another folder (common on v8.x servers installed from update
@@ -59,11 +55,22 @@ are kept under **Upgrade notes**. For upgrading an installation, see
   `.venv` when its Python no longer runs, for example after an OS upgrade.
 - Stopping a lab whose GNS3 project is closed no longer opens it first. A
   closed project runs nothing, and opening it failed when a node's image was
-  missing ("GNS3 refused the request (HTTP 409)").
-- Stop treats only an explicitly closed project as already stopped; an
-  unexpected or malformed project status is refused without touching the lab.
+  missing ("GNS3 refused the request (HTTP 409)"). Stop treats only an
+  explicitly closed project as already stopped; an unexpected or malformed
+  status is refused without touching the lab.
 - GNS3 error details stay out of what users see (as since v9.0.0); the full
   response is in `gns3-api.log` for administrators.
+- The lab limit can no longer be bypassed by sending requests at the same
+  time, and labs deleted directly in GNS3 no longer count against it.
+- The Nginx sample forwards `Host $http_host`, so sign-in works on a
+  non-standard port; `Origin: null` and the other unsafe methods (PUT,
+  PATCH, DELETE) are covered by the cross-site check.
+- `scripts/setup-mariadb.sh` restarts MariaDB only when its audit settings
+  changed, instead of on every upgrade. CI runs `shellcheck` on the scripts.
+- Background jobs keep a reference to their task; half-copied template
+  folders left by a crash are removed at start-up; the Templates page no
+  longer asks GNS3 about every lab; an empty "Labs allowed" box no longer
+  shows a raw error.
 
 ## v9.0.0 — 2026-11-26
 
