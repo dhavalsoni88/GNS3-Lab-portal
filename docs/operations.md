@@ -72,6 +72,11 @@ same host.
 
 ## Troubleshooting
 
+### A new HTTPS certificate does not take effect
+
+The portal reports "Nginx is not set up" or "Nginx refused that certificate".
+See [https.md](https.md#troubleshooting).
+
 ### Portal unavailable: "Too many open files"
 
 The portal uses one bounded connection pool to GNS3, and the systemd unit

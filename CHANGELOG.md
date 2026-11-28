@@ -5,6 +5,27 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.2.0 — 2026-11-28
+
+Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then, to
+use the new feature, `sudo bash scripts/setup-https.sh --fqdn <your name>`
+once ([docs/https.md](docs/https.md)).
+
+### New
+
+- **HTTPS from the portal.** **Administration › HTTPS** shows the current
+  certificate (names, issuer, expiry, fingerprint) and can create a
+  self-signed certificate for a chosen FQDN and Subject Alternative Names
+  (DNS names, wildcards, IP addresses), create a signing request (CSR) whose
+  private key never leaves the server, install the certificate a CA returns,
+  or upload a certificate and key (PEM or .pfx). Keys are checked against the
+  certificate; a private key is refused over plain HTTP. A replaced
+  certificate can be put back with one click.
+- `scripts/setup-https.sh` installs Nginx for HTTPS (HTTP redirects to HTTPS)
+  and a small root-owned helper that reloads Nginx after a new certificate is
+  installed, so the portal itself never runs as root. If Nginx rejects a new
+  certificate, the previous one is restored automatically.
+
 ## v9.1.1 — 2026-11-28
 
 ### Fixes

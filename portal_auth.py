@@ -32,6 +32,7 @@ PERMISSIONS = {
     "audit.all": "Read the full audit log",
     "servers.view": "See server status",
     "appliances.publish": "Publish GNS3 appliances to every lab",
+    "tls.manage": "Manage the portal's HTTPS certificate",
 }
 
 ROLES: dict[str, tuple[str, frozenset[str]]] = {

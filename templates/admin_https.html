@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}HTTPS · GNS3 Lab Portal{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>HTTPS</h1><p class="subtitle">The certificate Nginx shows to browsers. Make a self-signed one, ask a certificate authority for one with a signing request (CSR), or upload one you already have.</p></div>
+</div>
+
+<section class="card form-stack">
+  <h2>Status</h2>
+  <p style="margin:0">This page was loaded over <strong>{% if https_now %}HTTPS{% else %}plain HTTP{% endif %}</strong>.
+    {% if managed %}Nginx is set up to serve the certificate below: new certificates are loaded automatically.
+    {% else %}<span class="error">Nginx is not set up for HTTPS yet.</span> On the server run <code>sudo bash /opt/gns3-lab-portal/scripts/setup-https.sh --fqdn your.fqdn.example</code> once. After that, everything is done from this page.{% endif %}</p>
+  {% if cert %}
+  <div class="table-card"><table class="data">
+    <tbody>
+      <tr><th scope="row">Common name</th><td>{{ cert.common_name }}{% if cert.self_signed %} <span class="pill warn">Self-signed</span>{% endif %}</td></tr>
+      <tr><th scope="row">Names (SAN)</th><td>{% for name in cert.names %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% else %}<span class="error">none</span>{% endfor %}</td></tr>
+      <tr><th scope="row">Issued by</th><td>{{ cert.issuer }}</td></tr>
+      <tr><th scope="row">Valid until</th><td><time class="local-time" datetime="{{ cert.not_after }}">{{ cert.not_after[:10] }}</time> — {% if cert.days_left < 0 %}<span class="pill bad">expired</span>{% elif cert.days_left < 30 %}<span class="pill warn">{{ cert.days_left }} days left</span>{% else %}<span class="pill ok">{{ cert.days_left }} days left</span>{% endif %}</td></tr>
+      <tr><th scope="row">Key</th><td>{{ cert.key }}{% if chain_length > 1 %}, with {{ chain_length - 1 }} intermediate certificate{{ '' if chain_length == 2 else 's' }}{% endif %}</td></tr>
+      <tr><th scope="row">SHA-256 fingerprint</th><td><code style="word-break:break-all">{{ cert.fingerprint }}</code></td></tr>
+    </tbody>
+  </table></div>
+  <div class="row-actions">
+    <a class="button" href="/admin/https/certificate.pem">Download certificate</a>
+    {% if has_previous %}<form method="post" action="/admin/https/rollback" onsubmit="return confirm('Put the previous certificate back?')"><button>Restore the previous certificate</button></form>{% endif %}
+  </div>
+  {% else %}<p class="muted" style="margin:0">No certificate is installed yet.</p>{% endif %}
+</section>
+
+<section class="card form-stack">
+  <h2>Self-signed certificate</h2>
+  <p class="muted" style="margin:0">Quick and free, but browsers show a warning until you trust it. Good for a lab, or as a first step. It is installed straight away.</p>
+  <form class="form-stack" method="post" action="/admin/https/self-signed">
+    <label>FQDN<input name="fqdn" required maxlength="64" placeholder="lab.example.com" autocomplete="off"></label>
+    <label>Other names (SAN) <span class="muted">(one per line or comma-separated: DNS names, wildcards like *.example.com, or IP addresses)</span><textarea name="names" rows="3" placeholder="lab&#10;192.168.10.10"></textarea></label>
+    <div class="form-row">
+      <label>Valid for (days)<input name="days" type="number" min="1" max="{{ max_days }}" value="365" required></label>
+      <label>Key<select name="key_kind">{% for key, label in key_kinds.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label>
+    </div>
+    <div><button class="primary">Create and install</button></div>
+  </form>
+</section>
+
+<section class="card form-stack" id="pending">
+  <h2>Certificate from a certificate authority (CSR)</h2>
+  <p class="muted" style="margin:0">1. Create a signing request. The private key is made here and never leaves the server. 2. Send the request to your CA (a public one, or your company's). 3. Paste or upload the certificate it returns, together with any intermediate certificates.</p>
+  <form class="form-stack" method="post" action="/admin/https/csr">
+    <label>FQDN<input name="fqdn" required maxlength="64" placeholder="lab.example.com" autocomplete="off"></label>
+    <label>Other names (SAN) <span class="muted">(DNS names, wildcards or IP addresses)</span><textarea name="names" rows="3"></textarea></label>
+    <div class="form-row">
+      <label>Organization <span class="muted">(optional)</span><input name="organization" maxlength="64"></label>
+      <label>Unit <span class="muted">(optional)</span><input name="unit" maxlength="64"></label>
+    </div>
+    <div class="form-row">
+      <label>City <span class="muted">(optional)</span><input name="city" maxlength="64"></label>
+      <label>State <span class="muted">(optional)</span><input name="state" maxlength="64"></label>
+      <label>Country <span class="muted">(2 letters, optional)</span><input name="country" maxlength="2" size="3"></label>
+    </div>
+    <label>Key<select name="key_kind">{% for key, label in key_kinds.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label>
+    <div><button class="primary">Create signing request</button></div>
+  </form>
+  {% if pending %}
+  <h3>Waiting for a certificate</h3>
+  {% for item in pending %}
+  <div class="card form-stack">
+    <p style="margin:0"><strong>{{ item.fqdn }}</strong> <span class="muted">· created <time class="local-time" datetime="{{ item.created }}">{{ item.created[:10] }}</time></span></p>
+    <p class="muted" style="margin:0">{% for name in item.names %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+    <div class="row-actions">
+      <a class="button" href="/admin/https/csr/{{ item.id }}/download">Download the request (.csr)</a>
+      <form method="post" action="/admin/https/csr/{{ item.id }}/delete" onsubmit="return confirm('Delete this signing request and its private key?')"><button class="danger">Delete</button></form>
+    </div>
+    <form class="form-stack" method="post" action="/admin/https/csr/{{ item.id }}/certificate" enctype="multipart/form-data">
+      <label>Certificate from the CA (PEM or .cer), with intermediates if it sent any<input type="file" name="certificate_file" accept=".pem,.crt,.cer,.txt"></label>
+      <label>…or paste it<textarea name="certificate_text" rows="5" placeholder="-----BEGIN CERTIFICATE-----"></textarea></label>
+      <div><button class="primary">Install certificate</button></div>
+    </form>
+  </div>
+  {% endfor %}
+  {% endif %}
+</section>
+
+<section class="card form-stack">
+  <h2>Upload a certificate and its private key</h2>
+  {% if not https_now %}<p class="error" role="alert">Disabled while this page is on plain HTTP: a private key must not travel unencrypted. Install a self-signed certificate above first, then open this page over HTTPS. A signing request (above) never sends a key.</p>{% endif %}
+  <form class="form-stack" method="post" action="/admin/https/upload" enctype="multipart/form-data">
+    <fieldset {% if not https_now %}disabled{% endif %} class="form-stack" style="border:0;padding:0;margin:0">
+      <label>Certificate (PEM, with intermediates after it)<input type="file" name="certificate_file" accept=".pem,.crt,.cer,.txt"></label>
+      <label>Private key (PEM)<input type="file" name="key_file" accept=".pem,.key,.txt"></label>
+      <label>Key passphrase <span class="muted">(only if the key is encrypted)</span><input type="password" name="key_password" autocomplete="off"></label>
+      <p class="muted" style="margin:0">Or, instead of the two files above, one Windows-style bundle:</p>
+      <label>.pfx / .p12 file<input type="file" name="pfx_file" accept=".pfx,.p12"></label>
+      <label>.pfx password<input type="password" name="pfx_password" autocomplete="off"></label>
+      <div><button class="primary">Install</button></div>
+    </fieldset>
+  </form>
+  <p class="muted" style="margin:0">The key is checked against the certificate and kept on the server in <code>{{ tls_dir }}</code>, readable only by the portal and root.</p>
+</section>
+{% endblock %}
