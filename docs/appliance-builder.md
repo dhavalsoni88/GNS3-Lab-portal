@@ -11,7 +11,10 @@ the `.gns3a` file, shows the build console live, and hands the result to the nor
    and the CPU features the application needs. If not, it stops before copying anything.
 2. It clones your baseline disk (the baseline is never changed). The clone is grown to the disk size you
    chose; a baseline that is already larger keeps its size, because a disk is never shrunk.
-3. It boots the clone with QEMU/KVM, using a temporary SSH key delivered by cloud-init.
+3. It boots the clone with QEMU/KVM and logs in once as the baseline's user with the password typed on
+   the build form, to add a one-time SSH key and a temporary sudo rule. The password is handed to the
+   builder service in a file only it and the portal can read, deleted when the build starts, kept in
+   memory only, and never written to the console. The rest of the build uses the key.
 4. It installs the packages, then the application's `install-app.sh`, then your own script, as root inside
    the VM.
 5. It runs the application's `check-app.sh`. If the check fails, nothing is published.
@@ -34,8 +37,9 @@ sudo bash scripts/setup-builder.sh        # --build-user gns3 --service-user www
 
 It installs QEMU, xorriso and ssh, creates the folders, and starts the service. Then put your
 **baseline** in `/var/lib/gns3-lab-portal-builder/baselines/`: a stopped, application-free Ubuntu server
-disk (`.qcow2`, standalone, cloud-init enabled, with a normal user such as `labadmin`). Name the user on
-the build form if it is not `labadmin`.
+disk (`.qcow2`, standalone, OpenSSH started at boot with password login allowed, and a normal user with
+sudo such as `labadmin`). Give that user and its password on the build form. The file must be readable
+by the builder's user: `sudo chown gns3:gns3` it after copying it in as root.
 
 ## Applications (recipes)
 
@@ -132,7 +136,10 @@ of the scripts it ran, so editing or deleting a recipe later does not change a b
 - *Job stays "queued"*: `systemctl status gns3-lab-portal-builder`; `journalctl -u gns3-lab-portal-builder`.
 - *"The build VM stopped before SSH came up"*: `/dev/kvm` is missing or unusable by the GNS3 user (nested
   virtualization off?), or the baseline does not boot.
-- *"did not accept SSH in 10 minutes"*: the baseline has cloud-init disabled or a different login user.
+- *"did not answer on SSH in 10 minutes"*: OpenSSH does not start at boot in the baseline.
+- *"Could not log in as … with the password given"*: wrong user or password, password login disabled in
+  the baseline's sshd, or the user is not allowed to use sudo.
+- *qemu-img "Permission denied" on the baseline*: the file belongs to root; `sudo chown gns3:gns3` it.
 - *Install script failed*: the console shows the failing command. Fix the script or recipe and build again.
 - *"The application check failed"*: the application installed but did not answer; nothing was published.
 - *"needs … CPUs / MiB / GiB free / CPU features"*: the server cannot hold the build now; stop labs, lower

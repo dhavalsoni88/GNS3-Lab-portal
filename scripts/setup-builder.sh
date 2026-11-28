@@ -48,7 +48,7 @@ cat <<DONE
 
 APPLIANCE BUILDER IS SET UP.
   1. Put your stopped, application-free Ubuntu baseline disk (.qcow2) in $BUILDER_DIR/baselines/
-     (a clean cloud-init-enabled Ubuntu server image; the portal lists what it finds there).
+     (an application-free Ubuntu server with OpenSSH, password login and a user with sudo; the portal lists what it finds there).
   2. Open Administration > Appliance builder, choose the baseline and an application, and start a build.
   The builder writes finished disks into GNS3's QEMU image folder (GNS3_IMAGES_DIR) as user $BUILD_USER.
   Check it with: systemctl status gns3-lab-portal-builder

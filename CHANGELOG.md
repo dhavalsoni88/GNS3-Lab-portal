@@ -5,6 +5,19 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.4.3 — 2026-11-28
+
+### Fixes
+
+- **The builder logs in with the baseline user's password** (as the original kits did), asked for on
+  the build form. Ubuntu installs usually tell cloud-init to ignore seed disks, so the one-time SSH key
+  never reached the VM and builds stopped at "Permission denied". The password is used once to add a
+  one-time key and a temporary sudo rule, which sealing removes. It is passed to the builder in a file
+  only it and the portal can read, deleted when the build starts, and never logged or stored with the
+  job. The cloud-init seed disk is no longer used.
+- Docs and messages no longer ask for a cloud-init-enabled baseline: it needs OpenSSH with password
+  login and a user with sudo. A baseline copied in as root must be given to `gns3`.
+
 ## v9.4.2 — 2026-11-28
 
 ### Fixes
