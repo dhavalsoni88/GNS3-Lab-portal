@@ -2163,10 +2163,13 @@ async def builder_start(request: Request):
             raise ValueError(f"A disk named {job['image']} already exists in the appliance store. Use another name or version; existing disks are never replaced.")
         if any(item.get("image") == job["image"] and item["state"] not in builder.FINISHED for item in builder_store().all(200)):
             raise ValueError("A build for that name and version is already waiting or running.")
+        password = values.get("login_password", "")
+        if not password or len(password) > 256 or any(c in password for c in "\r\n\x00"):
+            raise ValueError("Enter the password of the baseline's login user (one line, up to 256 characters). It is used once to log in to the build VM and is not stored.")
         upload = form.get("icon")
         icon = await upload.read(builder.MAX_ICON + 1) if isinstance(upload, UploadFile) and upload.filename else b""
         recipe_icon = recipes[job["recipe"]]["icon"]
-        job_id = builder_store().create(job, icon or (recipe_icon.read_bytes() if recipe_icon else None))
+        job_id = builder_store().create(job, icon or (recipe_icon.read_bytes() if recipe_icon else None), password)
     except (ValueError, OSError) as exc:
         message = str(exc) if isinstance(exc, ValueError) else "The portal cannot write to the builder folder. Run scripts/setup-builder.sh on the server."
         return builder_back(message)

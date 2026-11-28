@@ -40,6 +40,16 @@ class Cancelled(Exception):
     pass
 
 
+def ssh_banner(port: int) -> bool:
+    """True once sshd in the VM answers (its greeting starts with SSH-)."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+            connection.settimeout(5)
+            return connection.recv(4).startswith(b"SSH-")
+    except OSError:
+        return False
+
+
 def host_facts() -> tuple[int, int, set[str]]:
     """CPUs, available memory (MiB) and CPU flags of this server. The VM runs with -cpu host, so it gets the same flags."""
     meminfo = Path("/proc/meminfo").read_text()
@@ -71,6 +81,12 @@ class Build:
         self.job = json.loads((folder / "job.json").read_text())
         self.work = BASE / "work" / self.job["id"]
         self.log = (folder / "console.log").open("ab", buffering=0)
+        secret = folder / "secret"
+        try:
+            self.password = secret.read_text().rstrip("\n")   # kept in memory only; never logged
+        except OSError:
+            self.password = ""
+        secret.unlink(missing_ok=True)
         self.qemu: subprocess.Popen | None = None
 
     def say(self, text: str) -> None:
@@ -136,10 +152,10 @@ class Build:
                  ("seal-ubuntu.sh", "rm -rf /root/.gns3-build\n" + f"export HOST_PREFIX={shlex.quote(recipe['host_prefix'])}\n" + (pb.ROOT / "deploy" / "builder" / "seal.sh").read_text())]
         return self.stage("seal.sh", recipe, steps)
 
-    def boot(self, disk: Path, seed: Path, port: int) -> None:
+    def boot(self, disk: Path, port: int) -> None:
         job = self.job
         command = ["qemu-system-x86_64", "-enable-kvm", "-cpu", "host", "-machine", "pc", "-m", str(job["ram"]), "-smp", str(job["cpus"]),
-                   "-drive", f"file={disk},if=virtio,format=qcow2", "-drive", f"file={seed},media=cdrom,readonly=on",
+                   "-drive", f"file={disk},if=virtio,format=qcow2",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:22", "-device", "virtio-net-pci,netdev=n0",
                    "-display", "none", "-serial", f"file:{self.work / 'serial.log'}", "-monitor", "none"]
         self.say("$ " + " ".join(shlex.quote(part) for part in command))
@@ -151,13 +167,41 @@ class Build:
             self.check_cancel()
             if self.qemu.poll() is not None:
                 raise RuntimeError("The build VM stopped before SSH came up. Check that /dev/kvm is usable and the baseline boots.")
-            try:
-                if self.ssh(port, key, "true", timeout=15) == 0:
-                    return
-            except RuntimeError:
-                pass
+            if ssh_banner(port):
+                return
             time.sleep(5)
-        raise RuntimeError("The build VM did not accept SSH in 10 minutes. Is cloud-init enabled in the baseline?")
+        raise RuntimeError("The build VM did not answer on SSH in 10 minutes. Does the baseline start OpenSSH at boot?")
+
+    def bootstrap(self, port: int, key: Path) -> None:
+        """Log in once with the baseline user's password, add the one-time key and a temporary sudo rule (seal removes both)."""
+        user = self.job["login_user"]
+        public = (self.work / "key.pub").read_text().strip()
+        script = f"""set -e
+home=$(getent passwd {user} | cut -d: -f6)
+install -d -m 700 -o {user} -g "$(id -gn {user})" "$home/.ssh"
+printf '%s\\n' {shlex.quote(public)} >> "$home/.ssh/authorized_keys"
+chown {user}:"$(id -gn {user})" "$home/.ssh/authorized_keys"; chmod 600 "$home/.ssh/authorized_keys"
+printf '%s ALL=(ALL) NOPASSWD:ALL\\n' {user} > /etc/sudoers.d/90-gns3-builder
+chmod 440 /etc/sudoers.d/90-gns3-builder; visudo -cf /etc/sudoers.d/90-gns3-builder >/dev/null
+echo "Build access added for {user}."
+"""
+        askpass = self.work / "askpass"
+        askpass.write_text('#!/bin/sh\nprintf \'%s\\n\' "$GNS3_BUILD_PASSWORD"\n')
+        askpass.chmod(0o700)
+        # The password reaches ssh through askpass and sudo through stdin; it is in no file, argument or log.
+        remote = f"IFS= read -r p; printf '%s\\n' \"$p\" | sudo -S -p '' bash -c {shlex.quote(script)}"
+        command = ["ssh", "-p", str(port), "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "PubkeyAuthentication=no",
+                   "-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "NumberOfPasswordPrompts=1", "-o", "ConnectTimeout=10",
+                   f"{user}@127.0.0.1", remote]
+        env = {**os.environ, "SSH_ASKPASS": str(askpass), "SSH_ASKPASS_REQUIRE": "force", "DISPLAY": os.environ.get("DISPLAY", ":0"), "GNS3_BUILD_PASSWORD": self.password}
+        try:
+            done = subprocess.run(command, input=(self.password + "\n").encode(), stdout=self.log, stderr=subprocess.STDOUT, env=env, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Logging in to the build VM took longer than 2 minutes.") from None
+        finally:
+            askpass.unlink(missing_ok=True)
+        if done.returncode != 0 or self.ssh(port, key, "sudo -n true", timeout=30) != 0:
+            raise RuntimeError(f"Could not log in as {user} with the password given, or {user} cannot use sudo. Check the user name and password of the baseline.")
 
     def finish_vm(self) -> None:
         deadline = time.monotonic() + SEAL_WAIT
@@ -185,7 +229,9 @@ class Build:
         self.status("running", "Checking this server can hold the build", 2)
         preflight(job, recipe)
         self.work.mkdir(parents=True, mode=0o700)
-        disk, seed, key = self.work / "disk.qcow2", self.work / "seed.iso", self.work / "key"
+        disk, key = self.work / "disk.qcow2", self.work / "key"
+        if not self.password:
+            raise RuntimeError("No password for the baseline user was given with this build.")
         self.status("running", "Cloning the Ubuntu baseline", 5)
         self.run("qemu-img", "convert", "-O", "qcow2", str(baseline), str(disk))
         self.run("qemu-img", "check", str(disk))
@@ -196,19 +242,15 @@ class Build:
             self.say(f"Disk kept at {current // 1024**3} GiB: the baseline is already that size or larger, and a disk is never shrunk.")
         self.status("running", "Preparing temporary build access", 12)
         self.run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "gns3-lab-builder", "-f", str(key))
-        seed_dir = self.work / "seed"
-        seed_dir.mkdir()
-        user = job["login_user"]
-        (seed_dir / "user-data").write_text("#cloud-config\npreserve_hostname: true\nusers:\n  - name: %s\n    lock_passwd: false\n    sudo: 'ALL=(ALL) NOPASSWD:ALL'\n    ssh_authorized_keys:\n      - %s\n" % (user, (self.work / "key.pub").read_text().strip()))
-        (seed_dir / "meta-data").write_text(f"instance-id: build-{job['id']}\n")
-        self.run("xorriso", "-as", "mkisofs", "-quiet", "-J", "-r", "-V", "cidata", "-o", str(seed), str(seed_dir))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         self.status("running", "Starting the build VM", 18)
-        self.boot(disk, seed, port)
+        self.boot(disk, port)
         self.status("running", "Waiting for the VM to accept SSH", 25)
         self.wait_ssh(port, key)
+        self.status("running", "Logging in with the baseline user's password", 30)
+        self.bootstrap(port, key)
         self.status("running", "Installing the application (this can take a while)", 35)
         if self.ssh(port, key, "sudo -n bash -s", stdin=self.install_stage(recipe), timeout=RECIPE_WAIT):
             raise RuntimeError("The install failed. The output above shows the failing command.")
@@ -278,6 +320,7 @@ class Analysis(Build):
 def recover() -> None:
     """A job left running by a crash or restart cannot be resumed: say so, and clear its work folder."""
     for folder in (BASE / "jobs").glob("*/"):
+        (folder / "secret").unlink(missing_ok=True)
         try:
             state = json.loads((folder / "status.json").read_text()).get("state")
         except (OSError, ValueError):

@@ -9,6 +9,13 @@ are kept under **Upgrade notes**. For upgrading an installation, see
 
 ### Fixes
 
+- **The builder logs in with the baseline user's password** (as the original kits did), asked for on
+  the build form. Ubuntu installs usually tell cloud-init to ignore seed disks, so the one-time SSH key
+  never reached the VM and builds stopped at "Permission denied". The password is used once to add a
+  one-time key and a temporary sudo rule, which sealing removes. It is passed to the builder in a file
+  only it and the portal can read, deleted when the build starts, and never logged or stored with the
+  job. The cloud-init seed disk is no longer used.
+
 - **A build no longer fails when the baseline disk is larger than the application's disk size** (for
   example a 32 GiB baseline and DVWA's 16 GiB). The builder used to ask `qemu-img` to shrink the disk,
   which it refuses. Now it only grows a disk; a larger baseline keeps its size, and the console says so.

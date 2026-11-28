@@ -28,8 +28,15 @@ def base(tmp_path, monkeypatch):
     return tmp_path
 
 
+PASSWORD = "baseline pass 'quoted' $x"
+
+
+def create(store, job, icon=None):
+    return store.create(job, icon, password=PASSWORD)
+
+
 def form(**extra):
-    return {"recipe": "custom", "name": "My Tool", "version": "1", "baseline": "ubuntu-base.qcow2", "seal_script": "true", **extra}
+    return {"recipe": "custom", "name": "My Tool", "version": "1", "baseline": "ubuntu-base.qcow2", "seal_script": "true", "login_password": PASSWORD, **extra}
 
 
 def make(**extra):
@@ -83,8 +90,8 @@ def test_job_store_paths_logs_and_icons(tmp_path):
         with pytest.raises(KeyError):
             store.path(bad)
     with pytest.raises(ValueError):
-        store.create(make(), b"not a png")
-    job_id = store.create(make(), PNG)
+        create(store, make(), b"not a png")
+    job_id = create(store, make(), PNG)
     assert (store.path(job_id) / "queued").exists() and (store.path(job_id) / "icon.png").read_bytes() == PNG
     assert store.get(job_id)["state"] == "queued"
     (store.path(job_id) / "console.log").write_bytes(b"line one\nline two\n")
@@ -126,6 +133,8 @@ def test_start_watch_cancel_and_publish_a_build(client, base):
     job_id = response.headers["location"].rsplit("/", 1)[1]
     assert "queued" in client.get(f"/admin/appliance-builder/{job_id}").text
     # a second request for the same name and version is refused while the first is waiting
+    assert "secret" in [p.name for p in pb.JobStore(base).path(job_id).iterdir()] and PASSWORD not in (pb.JobStore(base).path(job_id) / "job.json").read_text()
+    assert "password" in client.post("/admin/appliance-builder", data=form(name="No Pw", login_password=""), follow_redirects=False).headers["location"]
     assert "already+waiting" in client.post("/admin/appliance-builder", data=form(name="Web Lab", version="2"), follow_redirects=False).headers["location"]
     folder = pb.JobStore(base).path(job_id)
     (folder / "console.log").write_text("hello console\n")
@@ -172,7 +181,7 @@ STUBS = {
     "ssh-keygen": 'for a in "$@"; do last="$a"; done; echo KEY > "$last"; echo "ssh-ed25519 AAAA gns3-lab-builder" > "$last.pub"\n',
     "xorriso": 'for a in "$@"; do if [ "$prev" = "-o" ]; then touch "$a"; fi; prev="$a"; done\n',
     "qemu-system-x86_64": 'while [ ! -f "$STUB_OFF" ]; do sleep 0.1; done\n',
-    "ssh": 'body=$(cat); if [ -n "$body" ]; then n=$(ls "$STUB_STAGES" | wc -l); printf "%s" "$body" > "$STUB_STAGES/$n.sh"; fi\nif echo "$body" | grep -q gns3-firstboot; then echo GNS3-SEAL-COMPLETE; touch "$STUB_OFF"; fi\nif [ -n "$STUB_FAIL" ] && echo "$body" | grep -q "$STUB_FAIL"; then echo "stub failure"; exit 3; fi\nexit 0\n',
+    "ssh": 'case "$*" in *"read -r p"*) IFS= read -r given; [ "$given" = "$STUB_PASSWORD" ] && [ "$SSH_ASKPASS_REQUIRE" = force ] && [ "$($SSH_ASKPASS)" = "$STUB_PASSWORD" ] && echo "Build access added." && exit 0; echo "Permission denied"; exit 255;; esac\nbody=$(cat); if [ -n "$body" ]; then n=$(ls "$STUB_STAGES" | wc -l); printf "%s" "$body" > "$STUB_STAGES/$n.sh"; fi\nif echo "$body" | grep -q gns3-firstboot; then echo GNS3-SEAL-COMPLETE; touch "$STUB_OFF"; fi\nif [ -n "$STUB_FAIL" ] && echo "$body" | grep -q "$STUB_FAIL"; then echo "stub failure"; exit 3; fi\nexit 0\n',
 }
 
 
@@ -187,6 +196,7 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_OFF", str(tmp_path / "vm-off"))
     monkeypatch.setenv("STUB_STAGES", str(tmp_path / "stages"))
     monkeypatch.setenv("STUB_FAIL", "")
+    monkeypatch.setenv("STUB_PASSWORD", PASSWORD)
     monkeypatch.setenv("STUB_QEMU_LOG", str(tmp_path / "qemu-img.log"))
     (tmp_path / "stages").mkdir()
     monkeypatch.setenv("PORTAL_BUILDER_DIR", str(tmp_path / "b"))
@@ -199,6 +209,7 @@ def service(tmp_path, monkeypatch):
     sys.modules["appliance_builder_service"] = module
     spec.loader.exec_module(module)
     monkeypatch.setattr(module, "host_facts", lambda: (64, 65536, {"avx", "sse4_2", "aes"}))
+    monkeypatch.setattr(module, "ssh_banner", lambda port: True)
     return module, tmp_path
 
 
@@ -209,7 +220,7 @@ def stages(tmp):
 def test_service_builds_publishes_and_cleans_up(service):
     module, tmp = service
     store = pb.JobStore(tmp / "b")
-    job_id = store.create(make(recipe="custom", packages="nginx", custom_script="echo hi"), PNG)
+    job_id = create(store, make(recipe="custom", packages="nginx", custom_script="echo hi"), PNG)
     module.Build(store.path(job_id)).execute()
     status = store.status(job_id)
     log = (store.path(job_id) / "console.log").read_text()
@@ -227,13 +238,13 @@ def test_service_refuses_to_replace_a_disk_and_reports_failures(service):
     module, tmp = service
     store = pb.JobStore(tmp / "b")
     (tmp / "images" / "my-tool-1.qcow2").write_bytes(b"keep me")
-    job_id = store.create(make())
+    job_id = create(store, make())
     module.Build(store.path(job_id)).execute()
     assert store.status(job_id)["state"] == "failed" and "already exists" in store.status(job_id)["message"]
     assert (tmp / "images" / "my-tool-1.qcow2").read_bytes() == b"keep me"
     (tmp / "images" / "my-tool-1.qcow2").unlink()
     (tmp / "b" / "baselines" / "ubuntu-base.qcow2").unlink()   # baseline vanished: the clone step fails, nothing is published
-    second = store.create(make())
+    second = create(store, make())
     module.Build(store.path(second)).execute()
     assert store.status(second)["state"] == "failed" and not list((tmp / "images").iterdir())
 
@@ -241,7 +252,7 @@ def test_service_refuses_to_replace_a_disk_and_reports_failures(service):
 def test_service_runs_install_check_and_seal_in_order(service):
     module, tmp = service
     store = pb.JobStore(tmp / "b")
-    job_id = store.create(make(recipe="dvwa", name="DVWA", packages="vim", custom_script="echo extra"))
+    job_id = create(store, make(recipe="dvwa", name="DVWA", packages="vim", custom_script="echo extra"))
     module.Build(store.path(job_id)).execute()
     assert store.status(job_id)["state"] == "succeeded", (tmp / "b" / "jobs" / job_id / "console.log").read_text()
     install, check, seal = [text for text in stages(tmp) if text.strip()]   # the SSH probe sends nothing
@@ -256,7 +267,7 @@ def test_a_failing_check_stops_the_build_before_sealing(service, monkeypatch):
     module, tmp = service
     monkeypatch.setenv("STUB_FAIL", "PASS: DVWA answers")   # text that only the check stage contains
     store = pb.JobStore(tmp / "b")
-    job_id = store.create(make(recipe="dvwa", name="DVWA"))
+    job_id = create(store, make(recipe="dvwa", name="DVWA"))
     module.Build(store.path(job_id)).execute()
     assert store.status(job_id)["state"] == "failed" and "check failed" in store.status(job_id)["message"]
     assert not any("gns3-firstboot" in text for text in stages(tmp)) and not list((tmp / "images").iterdir())
@@ -267,12 +278,12 @@ def test_host_checks_refuse_a_build_the_server_cannot_hold(service, monkeypatch)
     store = pb.JobStore(tmp / "b")
     for facts, expected in (((2, 65536, {"avx", "sse4_2", "aes"}), "needs 4 CPUs"), ((64, 4096, {"avx", "sse4_2", "aes"}), "only 4096 MiB"), ((64, 65536, {"sse4_2"}), "avx, aes")):
         monkeypatch.setattr(module, "host_facts", lambda facts=facts: facts)
-        job_id = store.create(make(recipe="splunk", accept_license="yes", name=f"S {len(expected)}"))
+        job_id = create(store, make(recipe="splunk", accept_license="yes", name=f"S {len(expected)}"))
         module.Build(store.path(job_id)).execute()
         assert store.status(job_id)["state"] == "failed" and expected in store.status(job_id)["message"], store.status(job_id)
     job = make(name="Huge")
     job["recipe_snapshot"]["min_free_gib"] = 10**6
-    job_id = store.create(job)
+    job_id = create(store, job)
     module.Build(store.path(job_id)).execute()
     assert "GiB free" in store.status(job_id)["message"] and not stages(tmp)   # nothing was copied or booted
 
@@ -280,7 +291,7 @@ def test_host_checks_refuse_a_build_the_server_cannot_hold(service, monkeypatch)
 def test_stage_scripts_keep_hooks_apart_and_pass_the_licence(service):
     module, tmp = service
     store = pb.JobStore(tmp / "b")
-    job_id = store.create(make(recipe="splunk", accept_license="yes", name="Splunk"))
+    job_id = create(store, make(recipe="splunk", accept_license="yes", name="Splunk"))
     build = module.Build(store.path(job_id))
     build.work.mkdir(parents=True)
     recipe = build.job["recipe_snapshot"]
@@ -290,7 +301,7 @@ def test_stage_scripts_keep_hooks_apart_and_pass_the_licence(service):
     marker = text.split("cat > /root/.gns3-build/install-app.sh <<'", 1)[1].split("'", 1)[0]
     assert marker.startswith("GNS3_HOOK_") and text.count(marker) == 2 and "bash /root/.gns3-build/install-app.sh" in text   # exit 0 ends only the hook
     assert stat.S_IMODE((build.work / "install.sh").stat().st_mode) == 0o600
-    cancelled = store.create(make(name="Other"))
+    cancelled = create(store, make(name="Other"))
     (store.path(cancelled) / "cancel").touch()
     module.Build(store.path(cancelled)).execute()
     assert store.status(cancelled)["state"] == "cancelled" and not (tmp / "images" / "other-1.qcow2").exists()
@@ -357,11 +368,32 @@ def test_the_disk_is_grown_but_never_shrunk(service, monkeypatch):
     module, tmp = service
     store = pb.JobStore(tmp / "b")
     monkeypatch.setenv("STUB_DISK_GIB", "32")   # like the ironman baseline: 32 GiB, more than DVWA's 16
-    job_id = store.create(make(recipe="dvwa", name="Small"))
+    job_id = create(store, make(recipe="dvwa", name="Small"))
     module.Build(store.path(job_id)).execute()
     assert store.status(job_id)["state"] == "succeeded", (store.path(job_id) / "console.log").read_text()
     assert "resize" not in (tmp / "qemu-img.log").read_text() and "Disk kept at 32 GiB" in (store.path(job_id) / "console.log").read_text()
     monkeypatch.setenv("STUB_DISK_GIB", "8")
-    grown = store.create(make(recipe="dvwa", name="Grown", disk_gb="20"))
+    grown = create(store, make(recipe="dvwa", name="Grown", disk_gb="20"))
     module.Build(store.path(grown)).execute()
     assert store.status(grown)["state"] == "succeeded" and any(line.startswith("resize") and line.endswith(" 20G") for line in (tmp / "qemu-img.log").read_text().splitlines())
+
+
+def test_password_is_used_once_and_never_kept(service, monkeypatch):
+    module, tmp = service
+    store = pb.JobStore(tmp / "b")
+    job_id = create(store, make(name="Pw"))
+    folder = store.path(job_id)
+    assert oct((folder / "secret").stat().st_mode & 0o777) == "0o640" and PASSWORD not in (folder / "job.json").read_text()
+    module.Build(folder).execute()
+    assert store.status(job_id)["state"] == "succeeded", (folder / "console.log").read_text()
+    assert not (folder / "secret").exists() and PASSWORD not in (folder / "console.log").read_text() and "Build access added" in (folder / "console.log").read_text()
+    assert not any(PASSWORD in text for text in stages(tmp))
+    seal = [t for t in stages(tmp) if "gns3-firstboot" in t][0]
+    assert "/etc/sudoers.d/90-gns3-builder" in seal   # the temporary sudo rule goes before the image is published
+    monkeypatch.setenv("STUB_PASSWORD", "something else")
+    wrong = create(store, make(name="Wrong"))
+    module.Build(store.path(wrong)).execute()
+    assert store.status(wrong)["state"] == "failed" and "password" in store.status(wrong)["message"] and not list((tmp / "images").glob("wrong*"))
+    none = store.create(make(name="None"))
+    module.Build(store.path(none)).execute()
+    assert "No password" in store.status(none)["message"]

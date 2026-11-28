@@ -45,7 +45,8 @@
       </div>
       <div class="form-row">
         <label>Ubuntu baseline<select name="baseline" required>{% for name in baselines %}<option>{{ name }}</option>{% endfor %}</select></label>
-        <label>Baseline's login user<input name="login_user" value="labadmin" maxlength="32"></label>
+        <label>Baseline's login user<input name="login_user" value="labadmin" maxlength="32" autocomplete="off"></label>
+        <label>Its password<input name="login_password" type="password" required maxlength="256" autocomplete="off"><span class="muted">Used once to log in to the build VM. Not stored.</span></label>
       </div>
       <div class="form-row">
         <label>CPUs<input name="cpus" type="number" min="1" max="16" data-cpus></label>
@@ -74,7 +75,7 @@
         <div><dt>Appliance store</dt><dd class="mono" style="word-break:break-all">{{ store.path }}</dd><dd class="muted" style="font-weight:400">{% if store.exists %}{{ store.free_bytes | storage_size }} free{% else %}Folder not found{% endif %}</dd></div>
         <div><dt>Baselines</dt><dd class="mono" style="word-break:break-all">{{ builder_dir }}/baselines</dd></div>
       </dl>
-      {% if not baselines %}<p class="error" role="alert">No baseline disk found. Put a stopped Ubuntu server <code>.qcow2</code> (cloud-init enabled) in the baselines folder. On a new server run <code>sudo bash scripts/setup-builder.sh</code> first.</p>{% endif %}
+      {% if not baselines %}<p class="error" role="alert">No baseline disk found. Put a stopped Ubuntu server <code>.qcow2</code> (OpenSSH with password login, a user with sudo) in the baselines folder. On a new server run <code>sudo bash scripts/setup-builder.sh</code> first.</p>{% endif %}
       <button class="primary big"{% if not baselines %} disabled{% endif %}>Start build</button>
       <p class="muted" style="margin:0">A build often takes 10 to 40 minutes. The script runs as root in a throw-away VM, never on this server.</p>
     </section>

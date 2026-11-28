@@ -326,7 +326,7 @@ class JobStore:
             raise KeyError(job_id)
         return self.root / job_id
 
-    def create(self, job: dict[str, Any], icon: bytes | None = None) -> str:
+    def create(self, job: dict[str, Any], icon: bytes | None = None, password: str = "") -> str:
         if icon is not None and (not icon.startswith(PNG_MAGIC) or len(icon) > MAX_ICON):
             raise ValueError("The icon must be a PNG image of 1 MiB or less.")
         job_id = uuid.uuid4().hex
@@ -335,6 +335,10 @@ class JobStore:
         os.chmod(folder, 0o2775)   # the builder service (another user) writes here through the folder's ACL
         if icon is not None:
             (folder / "icon.png").write_bytes(icon)
+        if password:   # read and deleted by the builder service as it starts the job; 0640 lets it through the folder's ACL
+            descriptor = os.open(folder / "secret", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+            with os.fdopen(descriptor, "w") as handle:
+                handle.write(password)
         write_json(folder / "job.json", {**job, "id": job_id, "created": int(time.time())})
         (folder / "queued").touch()   # the builder service starts only jobs that carry this marker
         return job_id

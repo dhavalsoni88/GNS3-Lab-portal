@@ -39,7 +39,7 @@ systemctl enable gns3-firstboot.service
 touch /var/lib/gns3-golden/pending
 # Remove the temporary build access (key and passwordless sudo) added through cloud-init.
 sed -i '/gns3-lab-builder/d' /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys 2>/dev/null || true
-rm -f /etc/sudoers.d/90-cloud-init-users
+rm -f /etc/sudoers.d/90-cloud-init-users /etc/sudoers.d/90-gns3-builder
 if command -v cloud-init >/dev/null; then
   cloud-init clean --logs --machine-id --seed
   touch /etc/cloud/cloud-init.disabled
