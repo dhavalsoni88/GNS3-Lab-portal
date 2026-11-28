@@ -113,9 +113,17 @@ then run it a second time (it must be a quiet routine update) and sign in.
 
 ## Releasing
 
-1. Move the **Unreleased** notes in `CHANGELOG.md` under a dated version heading,
-   including any steps administrators must take.
-2. Update `version` in `pyproject.toml`.
+1. Put the release notes in `CHANGELOG.md` under a heading
+   `## vX.Y.Z — YYYY-MM-DD`, including any steps administrators must take.
+2. Set `version = "X.Y.Z"` in `pyproject.toml`.
 3. CI must be green. It installs the requirements, checks syntax and the
    shell scripts, and runs the tests on MariaDB.
 4. If the release adds a migration, say so in [upgrading.md](upgrading.md).
+5. Merge to `main`. That is all: the **Release** workflow
+   (`.github/workflows/release.yml`, `scripts/release-tag.sh`) sees a version
+   with no tag, creates the `vX.Y.Z` tag on that commit and publishes a
+   GitHub Release whose notes are the changelog section plus the upgrade
+   command. Pushes that do not change the version do nothing. A version whose
+   changelog heading still says *Unreleased* is skipped with a warning, and
+   one with no changelog section fails the workflow. If a run fails, fix the
+   changelog and re-run it from the Actions tab (**Run workflow**).

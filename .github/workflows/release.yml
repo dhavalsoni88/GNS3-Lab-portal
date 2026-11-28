@@ -1,0 +1,23 @@
+name: Release
+
+# Tags and publishes a release whenever main has a version (pyproject.toml) that has no tag yet.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  tag:
+    name: Tag release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create the tag and release if the version is new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release-tag.sh
