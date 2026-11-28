@@ -74,15 +74,40 @@ Use **Lab Operator** for people who only start and stop labs, and
   affect the template. This needs `GNS3_PROJECTS_DIR` set so the portal can
   read snapshot files ([configuration.md](configuration.md)).
 - **Appliances:** **Administration › Appliances** publishes a GNS3 appliance
-  to every lab:
-  - Choose its `.gns3a` file (from the GNS3 marketplace or the vendor),
-    optionally a version, and the disk images that version needs.
-  - The portal checks each image against the checksum in the appliance file,
-    uploads only images GNS3 does not have yet, and registers the template.
-    Every lab can use it at once.
-  - Existing templates and images are never changed or replaced. Publishing
-    refuses a template name that exists, or a different image with the same
-    file name, because labs may already use them.
+  to every lab. Disks live in the **appliance store**, GNS3's own QEMU image
+  folder (`GNS3_IMAGES_DIR`, by default `/home/gns3/GNS3/images/QEMU`); the
+  page always shows the exact path, whether the portal can write to it, and
+  the free space.
+  1. Choose the appliance's `.gns3a` file (from the GNS3 marketplace or the
+     vendor) and click **Check disks**. Nothing is uploaded yet.
+  2. For each disk the appliance needs, the next page says one of:
+     - **In the store:** ready.
+     - **Found elsewhere:** the server already has a disk with that name,
+       for example under `/home/gns3/GNS3/images`. It is moved into the store
+       when you publish (checked against the checksum first), so you don't
+       upload it again. Where the portal looks is set by
+       `PORTAL_APPLIANCE_SEARCH_DIRS`.
+     - **Missing:** the page shows exactly where the file has to be. Either
+       copy it there on the server and click **check again**, or upload it
+       from the page. An upload shows a progress bar and goes straight into
+       the store, so large disks don't time out.
+     - **Does not match:** the store already has a different file with that
+       name. It is never replaced; rename or remove it on the server first.
+  3. Add **Notes** if you like (default login, first-boot steps). Users see
+     them under **Usage** when they configure the appliance in GNS3. The
+     appliance file's own `usage` text is filled in for you.
+  4. **Publish to all labs.** Moving large disks and registering the
+     appliance run in the background with a progress bar. Every lab can use
+     the appliance as soon as it finishes; appliances users added themselves
+     are never touched.
+  - The portal must be able to write to the store folder: on the server run
+    `sudo setfacl -R -m u:www-data:rwX /home/gns3/GNS3/images/QEMU`
+    ([installation guide](installation.md)).
+  - Publishing refuses a template name that exists. QEMU options in an
+    appliance file are limited to a short safe list (`-nographic`, `-cpu`,
+    `-smp`, `-machine`, `-enable-kvm`, `-rtc`, `-vga`, `-no-acpi`,
+    `-no-hpet`, `-global`, `-boot`), because they run on the GNS3 server;
+    anything else is refused with a message naming it.
   - QEMU appliances only for now. Only Platform Admins can publish.
 - **Templates waiting for approval** appear under **Templates** for Template
   Approvers and Platform Admins. Approving publishes the template to
@@ -90,8 +115,9 @@ Use **Lab Operator** for people who only start and stop labs, and
 - **Retained backups:** each user's allowance is set on the Users page
   (default 2). Users free a slot with **New lab › From a backup › Delete
   selected backup**; Lab Managers can delete anyone's.
-- **Uploads** are limited by `PORTAL_MAX_UPLOAD_BYTES` (default 50 GiB) and
-  by Nginx `client_max_body_size`. Change both together.
+- **Uploads** are limited by `PORTAL_MAX_UPLOAD_BYTES` (default 50 GiB) for
+  backups and `PORTAL_MAX_APPLIANCE_IMAGE_BYTES` (default 512 GiB) for
+  appliance disks. The Nginx sample sets no limit of its own.
 - **Disk space:** watch the snapshot disk, `RETAINED_BACKUP_DIR` and
   `LAB_TEMPLATE_DIR`. Moving snapshots to a separate disk is covered in
   [storage.md](storage.md).

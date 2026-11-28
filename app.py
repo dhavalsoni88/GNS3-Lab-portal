@@ -1,6 +1,7 @@
 """Small, server-side GNS3 lab and snapshot portal."""
 import asyncio
 import base64
+import getpass
 import hashlib
 import hmac
 import json
@@ -8,7 +9,9 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -72,6 +75,12 @@ GNS3_PROJECTS_DIR = Path(GNS3_PROJECTS_DIR_VALUE).expanduser() if GNS3_PROJECTS_
 # disk, this value allows the portal to safely follow only that storage root.
 GNS3_SNAPSHOTS_DIR_VALUE = os.getenv("GNS3_SNAPSHOTS_DIR", "").strip()
 GNS3_SNAPSHOTS_DIR = Path(GNS3_SNAPSHOTS_DIR_VALUE).expanduser() if GNS3_SNAPSHOTS_DIR_VALUE else None
+# The appliance store is GNS3's own QEMU image folder, so every lab (and every GNS3 app) sees an image
+# the moment it is there. Disks already on the server are looked for under PORTAL_APPLIANCE_SEARCH_DIRS.
+GNS3_ROOT = GNS3_PROJECTS_DIR.parent if GNS3_PROJECTS_DIR else Path("/home/gns3/GNS3")
+GNS3_IMAGES_DIR = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or GNS3_ROOT / "images" / "QEMU").expanduser()
+APPLIANCE_SEARCH_DIRS = tuple(Path(item.strip()).expanduser() for item in os.getenv("PORTAL_APPLIANCE_SEARCH_DIRS", str(GNS3_ROOT / "images")).split(",") if item.strip())
+MAX_APPLIANCE_IMAGE_BYTES = int(os.getenv("PORTAL_MAX_APPLIANCE_IMAGE_BYTES", str(512 * 1024**3)))
 # Native snapshots can take many minutes for large labs. Browsers poll a job
 # status endpoint, so this timeout only governs portal-to-controller traffic.
 GNS3_TIMEOUT_SECONDS = float(os.getenv("GNS3_TIMEOUT_SECONDS", "3600"))
@@ -194,6 +203,21 @@ def safe_avatar_path(filename: str | None) -> Path | None:
     return path if path.is_file() else None
 
 
+def remove_orphan_template_dirs() -> None:
+    """Delete template folders with no database record that are over a day old (a crash mid-copy)."""
+    with db.connect() as connection:
+        known = {str(row[0]) for row in connection.execute("SELECT template_id FROM lab_templates").fetchall()}
+    cutoff = time.time() - 86400
+    try:
+        for entry in LAB_TEMPLATE_DIR.iterdir():
+            if re.fullmatch(r"[0-9a-f-]{36}", entry.name) and entry.is_dir() and not entry.is_symlink() \
+                    and entry.name not in known and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+                portal_logger.warning("removed_orphan_template_dir name=%s", entry.name)
+    except OSError:
+        portal_logger.exception("orphan_template_cleanup_failed")
+
+
 def init_db() -> None:
     if AUTH_ENABLED and (SECRET_KEY in WEAK_SECRET_KEYS or len(SECRET_KEY) < 32):
         raise RuntimeError("PORTAL_SECRET_KEY is a placeholder or shorter than 32 characters. Set a long random value, for example: python3 -c 'import secrets; print(secrets.token_urlsafe(48))'")
@@ -222,6 +246,7 @@ def init_db() -> None:
                 (PORTAL_USERNAME, password_hash(PORTAL_PASSWORD), "admin", 1, datetime.now(timezone.utc).isoformat()),
             )
     auth.seed_roles_from_legacy()
+    remove_orphan_template_dirs()
 
 
 def audit(actor: str, action: str, target: str, details: dict[str, Any] | None = None, outcome: str = "success") -> None:
@@ -372,20 +397,25 @@ def lab_limit(username: str) -> int:
     return max(0, int(account.get("lab_limit") if account and account.get("lab_limit") is not None else 2))
 
 
-def labs_in_use(username: str) -> int:
-    """Labs the user owns, plus imports still creating one for them."""
+def labs_in_use(username: str, existing_ids: set[str]) -> int:
+    """Labs the user owns in GNS3 (labs deleted in GNS3 itself do not count), plus labs being created for them."""
     pending = sum(1 for job in app.state.import_jobs.values()
                   if job.get("actor") == username and job.get("status") in ACTIVE_IMPORT_STATES)
-    return len(owned_project_ids(username)) + pending
+    return len(owned_project_ids(username) & existing_ids) + pending + app.state.lab_reservations.get(username, 0)
 
 
-def lab_limit_refusal(request: Request) -> RedirectResponse | None:
-    """Refuse a new lab once the user owns their limit; Lab Managers and admins are not limited."""
+async def lab_limit_refusal(request: Request) -> RedirectResponse | None:
+    """Refuse a new lab once the user owns their limit; Lab Managers and admins are not limited.
+
+    Callers must reserve their slot (or register their job) right after this returns,
+    with no await in between, so that simultaneous requests cannot all pass.
+    """
     if not AUTH_ENABLED or has_admin_scope(request):
         return None
     user = current_user(request)
+    existing = {str(project.get("project_id")) for project in await gns3("GET", "/v2/projects") or []}
     limit = lab_limit(user)
-    if labs_in_use(user) >= limit:
+    if labs_in_use(user, existing) >= limit:
         message = f"You already have {limit} lab(s), your limit. Delete a lab or ask an administrator to raise your limit."
         return RedirectResponse(f"/labs/new?error={quote_plus(message)}", status_code=303)
     return None
@@ -439,6 +469,10 @@ async def lifespan(app_instance: FastAPI):
     app_instance.state.backup_jobs = {}
     app_instance.state.import_jobs = {}
     app_instance.state.template_jobs = {}
+    app_instance.state.lab_reservations = {}  # labs being created right now, per user
+    app_instance.state.tasks = set()
+    app_instance.state.appliance_drafts = {}
+    app_instance.state.appliance_jobs = {}
     app_instance.state.monitor_disk_samples = {}
     app_instance.state.saml_requests = auth.SamlRequestStore()
     app_instance.state.login_failures = {}
@@ -470,10 +504,11 @@ class AuditContextMiddleware:
         # SameSite=Lax still lets sibling subdomains post forms, so check where a post came from.
         # SAML responses are posted by the identity provider, a different site, and are signed instead.
         origin = headers.get("origin")
-        if scope["method"] == "POST" and origin and not scope["path"].startswith("/auth/saml/") \
-                and urlsplit(origin).netloc not in {headers.get("host", ""), urlsplit(PORTAL_PUBLIC_URL).netloc}:
-            await PlainTextResponse("Cross-site request refused.", status_code=403)(scope, receive, send)
-            return
+        if scope["method"] in {"POST", "PUT", "PATCH", "DELETE"} and origin and not scope["path"].startswith("/auth/saml/"):
+            allowed = {value for value in (headers.get("host", ""), urlsplit(PORTAL_PUBLIC_URL).netloc) if value}
+            if urlsplit(origin).netloc not in allowed:  # also refuses "Origin: null"
+                await PlainTextResponse("Cross-site request refused.", status_code=403)(scope, receive, send)
+                return
         client_ip = (scope.get("client") or ("", 0))[0] or ""
         forwarded = headers.get("x-forwarded-for", "")
         if forwarded and client_ip in PORTAL_TRUSTED_PROXIES:
@@ -1190,56 +1225,174 @@ async def run_backup_job(job: dict[str, Any]) -> None:
 
 
 # --- Appliance publishing ---------------------------------------------------
-# GNS3 appliance files (.gns3a) describe a node type and the disk images it needs.
-# Publishing uploads missing images to GNS3 and registers a template every lab can use.
+# A GNS3 appliance file (.gns3a) names a node type and the disk images it needs. Publishing puts the
+# images in GNS3's QEMU image folder (the "appliance store") and registers one template, so every lab
+# can use it. Existing templates and images are never replaced.
 QEMU_TEMPLATE_KEYS = frozenset({
-    "adapter_type", "adapters", "ram", "cpus", "console_type", "options", "boot_priority",
+    "adapter_type", "adapters", "ram", "cpus", "console_type", "boot_priority",
     "hda_disk_interface", "hdb_disk_interface", "hdc_disk_interface", "hdd_disk_interface",
     "kernel_command_line", "first_port_name", "port_name_format", "port_segment_size",
     "linked_clone", "on_close", "cpu_throttling", "process_priority",
 })
+# "options" is the raw QEMU command line and runs as GNS3's operating-system user, so only these flags pass.
+SAFE_QEMU_FLAGS = frozenset({"-nographic", "-cpu", "-smp", "-machine", "-enable-kvm", "-rtc", "-vga", "-no-acpi", "-no-hpet", "-global", "-boot"})
 IMAGE_SLOTS = frozenset({"hda_disk_image", "hdb_disk_image", "hdc_disk_image", "hdd_disk_image", "cdrom_image", "initrd", "kernel_image", "bios_image"})
 SAFE_IMAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,200}$")
 APPLIANCE_COMPUTE_ID = GNS3_MONITOR_COMPUTE_ID or "local"
+CHUNK = 8 * 1024 * 1024
 
 
-def appliance_template(appliance: Any, version_name: str = "") -> tuple[dict[str, Any], dict[str, str | None]]:
-    """Return the GNS3 template for one appliance version, and {image filename: expected md5}."""
+def safe_qemu_options(value: Any) -> str:
+    try:
+        tokens = shlex.split(str(value))
+    except ValueError as exc:
+        raise ValueError("The appliance's QEMU options could not be read.") from exc
+    refused = next((token for token in tokens if token.startswith("-") and token not in SAFE_QEMU_FLAGS), None)
+    if refused:
+        raise ValueError(f"The appliance asks for the QEMU option {refused}, which is not allowed because it runs on the GNS3 server. "
+                         f"Allowed: {', '.join(sorted(SAFE_QEMU_FLAGS))}. Remove it from the .gns3a file if it is not needed.")
+    return " ".join(tokens)
+
+
+def appliance_template(appliance: Any, version_name: str = "") -> tuple[dict[str, Any], dict[str, dict[str, Any]], str]:
+    """Return the GNS3 template for one appliance version, its images {file name: md5 and size}, and its own usage text."""
     if not isinstance(appliance, dict) or not isinstance(appliance.get("qemu"), dict) or not appliance.get("name"):
         raise ValueError("Only QEMU appliance files (.gns3a) can be published for now.")
     version = next((item for item in appliance.get("versions") or [] if isinstance(item, dict) and (not version_name or item.get("name") == version_name)), None)
     if not version:
         raise ValueError(f"The appliance has no version named {version_name!r}." if version_name else "The appliance file lists no versions.")
-    images = {slot: str(name) for slot, name in (version.get("images") or {}).items() if slot in IMAGE_SLOTS}
-    if not images or not all(SAFE_IMAGE_NAME.match(name) for name in images.values()):
+    slots = {slot: str(name) for slot, name in (version.get("images") or {}).items() if slot in IMAGE_SLOTS}
+    if not slots or not all(SAFE_IMAGE_NAME.match(name) for name in slots.values()):
         raise ValueError("The chosen version must name its disk images with plain file names.")
     template = {key: value for key, value in appliance["qemu"].items() if key in QEMU_TEMPLATE_KEYS}
+    if appliance["qemu"].get("options"):
+        template["options"] = safe_qemu_options(appliance["qemu"]["options"])
     if appliance["qemu"].get("arch"):
         template["platform"] = str(appliance["qemu"]["arch"])
     category = {"multilayer_switch": "switch"}.get(str(appliance.get("category")), str(appliance.get("category")))
-    template.update(images, template_type="qemu", compute_id=APPLIANCE_COMPUTE_ID,
+    template.update(slots, template_type="qemu", compute_id=APPLIANCE_COMPUTE_ID,
                     name=f"{appliance['name']} {version.get('name', '')}".strip()[:200],
                     category=category if category in {"router", "switch", "guest", "firewall"} else "guest")
-    checksums = {str(item.get("filename")): item.get("md5sum") for item in appliance.get("images") or [] if isinstance(item, dict)}
-    return template, {name: checksums.get(name) for name in images.values()}
+    listed = {str(item.get("filename")): item for item in appliance.get("images") or [] if isinstance(item, dict)}
+    images = {name: {"md5": listed.get(name, {}).get("md5sum"), "size": int(listed.get(name, {}).get("filesize") or 0) or None} for name in slots.values()}
+    return template, images, str(appliance.get("usage") or appliance.get("notes") or "")[:2000]
 
 
-def file_md5(source: Any) -> str:
+def appliance_store_info() -> dict[str, Any]:
+    exists = GNS3_IMAGES_DIR.is_dir()
+    try:
+        service_user = getpass.getuser()
+    except (KeyError, OSError):
+        service_user = "www-data"
+    return {
+        "path": str(GNS3_IMAGES_DIR), "exists": exists, "user": service_user,
+        "writable": exists and os.access(GNS3_IMAGES_DIR, os.W_OK | os.X_OK),
+        "free_bytes": shutil.disk_usage(GNS3_IMAGES_DIR).free if exists else None,
+        "search_dirs": [str(path) for path in APPLIANCE_SEARCH_DIRS],
+    }
+
+
+def find_image_elsewhere(name: str, size: int | None) -> Path | None:
+    """Look for a disk with this exact file name outside the store, a few folders deep."""
+    store = os.path.realpath(GNS3_IMAGES_DIR)
+    visited = 0
+    for root in APPLIANCE_SEARCH_DIRS:
+        for folder, subfolders, files in os.walk(root, followlinks=False):
+            visited += 1
+            if visited > 20000 or folder[len(str(root)):].count(os.sep) >= 4:
+                subfolders[:] = []
+            if os.path.realpath(folder) == store or os.path.realpath(folder).startswith(store + os.sep):
+                subfolders[:] = []
+                continue
+            if name in files:
+                candidate = Path(folder) / name
+                if not candidate.is_symlink() and candidate.is_file() and (not size or candidate.stat().st_size == size):
+                    return candidate
+    return None
+
+
+def appliance_image_states(images: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """For every image: ready (in the store), found (elsewhere, will be moved), missing or mismatch (different size)."""
+    states = []
+    for name, expected in images.items():
+        target = GNS3_IMAGES_DIR / name
+        state: dict[str, Any] = {"name": name, "state": "missing", "path": str(target), "size": expected["size"]}
+        try:
+            if target.is_file():
+                actual = target.stat().st_size
+                if expected["size"] and actual != expected["size"]:
+                    state.update(state="mismatch", detail=f"{format_storage_size(actual)} in the store, {format_storage_size(expected['size'])} in the appliance file")
+                else:
+                    state.update(state="ready")
+            elif found := find_image_elsewhere(name, expected["size"]):
+                state.update(state="found", path=str(found))
+        except OSError as exc:
+            state.update(state="mismatch", detail=f"cannot be read ({exc.strerror})")
+        states.append(state)
+    return states
+
+
+def move_image(source: Path, destination: Path, expected: dict[str, Any], job: dict[str, Any], index: int, total: int) -> None:
+    """Move a disk into the store, checking its checksum first; leave it untouched if it does not match."""
+    size = max(source.stat().st_size, 1)
     digest = hashlib.md5(usedforsecurity=False)
-    source.seek(0)
-    while chunk := source.read(1024 * 1024):
-        digest.update(chunk)
-    source.seek(0)
-    return digest.hexdigest()
+
+    def progress(done: int, verb: str) -> None:
+        job.update(progress_percent=int(90 * (index + done / size) / total), message=f"{verb} {destination.name} ({format_storage_size(done)} of {format_storage_size(size)})…")
+
+    if destination.exists():
+        raise ValueError(f"{destination.name} appeared in the store meanwhile. Nothing was replaced.")
+    same_disk = source.stat().st_dev == GNS3_IMAGES_DIR.stat().st_dev
+    part = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.part")
+    try:
+        done = 0
+        with source.open("rb") as reader, (part.open("wb") if not same_disk else open(os.devnull, "wb")) as writer:
+            while chunk := reader.read(CHUNK):
+                done += len(chunk)
+                digest.update(chunk)
+                writer.write(chunk)
+                progress(done, "Checking" if same_disk else "Copying")
+        if expected["md5"] and digest.hexdigest() != expected["md5"]:
+            raise ValueError(f"{source} does not match the checksum in the appliance file, so it was not used. It was left where it is.")
+        os.rename(source if same_disk else part, destination)
+    finally:
+        part.unlink(missing_ok=True)
+    try:
+        os.chmod(destination, 0o644)  # GNS3 runs as another user and must be able to read it
+    except OSError:
+        portal_logger.warning("appliance_chmod_failed path=%s", destination)
+    if not same_disk:
+        try:
+            source.unlink()
+        except OSError:
+            portal_logger.warning("appliance_original_not_removed path=%s", source)
 
 
-async def upload_gns3_image(filename: str, upload: UploadFile) -> None:
-    """Stream one image file to the GNS3 compute without holding it in memory."""
-    async def body():
-        upload.file.seek(0)
-        while chunk := await asyncio.to_thread(upload.file.read, 1024 * 1024):
-            yield chunk
-    await gns3("POST", f"/v2/computes/{quote(APPLIANCE_COMPUTE_ID, safe='')}/qemu/images/{quote(filename, safe='')}", content=body())
+async def run_appliance_job(job: dict[str, Any], draft: dict[str, Any], states: list[dict[str, Any]], notes: str) -> None:
+    template, moved = dict(draft["template"]), []
+    try:
+        for index, state in enumerate(states):
+            if state["state"] == "found":
+                await asyncio.to_thread(move_image, Path(state["path"]), GNS3_IMAGES_DIR / state["name"], draft["images"][state["name"]], job, index, len(states))
+                moved.append(state["name"])
+        if notes.strip():
+            template["usage"] = notes.strip()[:2000]  # shown under Usage when the appliance is configured in GNS3
+        job.update(progress_percent=95, message="Registering the appliance in GNS3…")
+        if any(item.get("name") == template["name"] for item in await gns3("GET", "/v2/templates") or []):
+            raise ValueError(f"A template named {template['name']} already exists. Nothing was changed.")
+        await gns3("POST", "/v2/templates", json=template)
+    except HTTPException as exc:
+        job.update(status="failed", message=str(exc.detail))
+        return
+    except ValueError as exc:
+        job.update(status="failed", message=str(exc))
+        return
+    except OSError:
+        portal_logger.exception("appliance_publish_failed name=%s", template["name"])
+        job.update(status="failed", message="A disk could not be moved into the appliance store. The portal needs write access to the store and to the folder the disk is in; check permissions and free space.")
+        return
+    audit(job["audit_actor"], "publish_appliance", template["name"], {"images_moved": moved, "images_already_in_store": [item["name"] for item in states if item["state"] == "ready"]})
+    job.update(status="completed", progress_percent=100, message=f"Published {template['name']}. It is available in every lab now.")
 
 
 def error_page(request: Request, exc: HTTPException) -> HTMLResponse:
@@ -1597,7 +1750,7 @@ async def admin_create_user(request: Request, username: str = Form(...), passwor
 
 
 @app.post("/admin/users/{username}/update")
-async def admin_update_user(request: Request, username: str, roles: list[str] = Form([]), role: str = Form(""), enabled: str = Form("0"), password: str = Form(""), retained_backup_limit: int = Form(2), lab_limit: int | None = Form(None)):
+async def admin_update_user(request: Request, username: str, roles: list[str] = Form([]), role: str = Form(""), enabled: str = Form("0"), password: str = Form(""), retained_backup_limit: int = Form(2), lab_limit: str = Form("")):
     require_permission(request, "users.manage", portal_wide=True)
     target = user_record(username)
     if not target:
@@ -1606,7 +1759,10 @@ async def admin_update_user(request: Request, username: str, roles: list[str] = 
     is_enabled = enabled == "1"
     if retained_backup_limit < 0 or retained_backup_limit > 100:
         return RedirectResponse("/admin/users?error=Retained+backup+limit+must+be+between+0+and+100", status_code=303)
-    lab_limit = target.get("lab_limit", 2) if lab_limit is None else lab_limit
+    try:
+        lab_limit = int(lab_limit) if lab_limit.strip() else int(target.get("lab_limit", 2))
+    except ValueError:
+        lab_limit = -1
     if lab_limit < 0 or lab_limit > 100:
         return RedirectResponse("/admin/users?error=Lab+limit+must+be+between+0+and+100", status_code=303)
     if target["username"].lower() == signed_in_user(request).lower() and not is_enabled:
@@ -1787,60 +1943,140 @@ async def roles_page(request: Request):
     return templates.TemplateResponse(request, "admin_roles.html", {**base_context(request, "roles"), "holders": holders, "mappings": auth.group_mappings(), "providers": {item["provider_id"]: item for item in auth.list_providers()}})
 
 
+def appliance_admin(request: Request) -> None:
+    require_permission(request, "appliances.publish", portal_wide=True)
+
+
+def appliance_draft(draft_id: str) -> dict[str, Any]:
+    draft = app.state.appliance_drafts.get(draft_id)
+    if not draft:
+        raise HTTPException(404, "That appliance was not found. It may have been cleared after a portal restart: choose the .gns3a file again.")
+    return draft
+
+
 @app.get("/admin/appliances", response_class=HTMLResponse)
 async def appliances_page(request: Request):
     if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
-    require_permission(request, "appliances.publish", portal_wide=True)
+    appliance_admin(request)
     try:
         gns3_templates, load_error = await gns3("GET", "/v2/templates"), ""
     except HTTPException as exc:
         gns3_templates, load_error = [], str(exc.detail)
     gns3_templates = sorted(gns3_templates or [], key=lambda item: str(item.get("name", "")).lower())
-    return templates.TemplateResponse(request, "admin_appliances.html", {**base_context(request, "appliances"), "gns3_templates": gns3_templates, "load_error": load_error})
+    return templates.TemplateResponse(request, "admin_appliances.html", {**base_context(request, "appliances"), "gns3_templates": gns3_templates, "load_error": load_error, "store": await asyncio.to_thread(appliance_store_info)})
 
 
 @app.post("/admin/appliances")
-async def publish_appliance(request: Request, appliance_file: UploadFile = File(...), version: str = Form(""), image_files: list[UploadFile] = File([])):
-    """Add a QEMU appliance for every lab. Existing images and templates are never replaced."""
-    require_permission(request, "appliances.publish", portal_wide=True)
-
-    def back(text: str, kind: str = "error") -> RedirectResponse:
-        return RedirectResponse(f"/admin/appliances?{kind}={quote_plus(text)}", status_code=303)
-
+async def inspect_appliance(request: Request, appliance_file: UploadFile = File(...), version: str = Form("")):
+    """Read a .gns3a file and open its review page, which shows which disks the server already has."""
+    appliance_admin(request)
     raw = await appliance_file.read(1024 * 1024 + 1)
+    await appliance_file.close()
     try:
         if len(raw) > 1024 * 1024:
-            raise ValueError("The appliance file is larger than 1 MiB; choose the .gns3a file, not an image.")
-        template, needed = appliance_template(json.loads(raw), version.strip())
+            raise ValueError("The appliance file is larger than 1 MiB; choose the .gns3a file, not a disk image.")
+        template, images, default_notes = appliance_template(json.loads(raw), version.strip())
     except (ValueError, UnicodeDecodeError) as exc:
-        return back("That is not a valid .gns3a appliance file." if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)) else str(exc))
-    uploads = {Path(item.filename or "").name: item for item in image_files if item.filename}
+        message = "That is not a valid .gns3a appliance file." if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)) else str(exc)
+        return RedirectResponse(f"/admin/appliances?error={quote_plus(message)}", status_code=303)
+    drafts = app.state.appliance_drafts
+    for key in [key for key, item in drafts.items() if time.monotonic() - item["created"] > 6 * 3600]:
+        del drafts[key]
+    draft_id = uuid.uuid4().hex
+    drafts[draft_id] = {"template": template, "images": images, "notes": default_notes, "created": time.monotonic()}
+    return RedirectResponse(f"/admin/appliances/{draft_id}", status_code=303)
+
+
+@app.get("/admin/appliances/{draft_id}", response_class=HTMLResponse)
+async def appliance_review_page(request: Request, draft_id: str):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    appliance_admin(request)
+    draft = appliance_draft(draft_id)
+    states = await asyncio.to_thread(appliance_image_states, draft["images"])
+    job_id = request.query_params.get("job", "")
     try:
-        if any(item.get("name") == template["name"] for item in await gns3("GET", "/v2/templates") or []):
-            return back(f"A template named {template['name']} already exists. Nothing was changed.")
-        on_server = {str(item.get("filename")): item.get("md5sum") for item in await gns3("GET", f"/v2/computes/{quote(APPLIANCE_COMPUTE_ID, safe='')}/qemu/images") or []}
-        # Check every image before uploading any, so a refusal leaves GNS3 unchanged.
-        for name, expected in needed.items():
-            if name in uploads:
-                digest = await asyncio.to_thread(file_md5, uploads[name].file)
-                if expected and digest != expected:
-                    return back(f"{name} does not match the checksum in the appliance file. Upload the exact image it names.")
-                if name in on_server and on_server[name] != digest:
-                    return back(f"GNS3 already has a different {name}. Existing images are never replaced, because labs may use them.")
-            elif name not in on_server:
-                return back(f"Also upload {name}: this appliance needs it and the GNS3 server does not have it yet.")
-        uploaded = [name for name in needed if name in uploads and name not in on_server]
-        for name in uploaded:
-            await upload_gns3_image(name, uploads[name])
-        await gns3("POST", "/v2/templates", json=template)
-    except HTTPException as exc:
-        return back(str(exc.detail))
+        taken = any(item.get("name") == draft["template"]["name"] for item in await gns3("GET", "/v2/templates") or [])
+    except HTTPException:
+        taken = False
+    return templates.TemplateResponse(request, "admin_appliance_review.html", {
+        **base_context(request, "appliances"), "draft_id": draft_id, "draft": draft, "states": states, "store": await asyncio.to_thread(appliance_store_info),
+        "can_publish": all(item["state"] in {"ready", "found"} for item in states) and not taken, "name_taken": taken,
+        "job_id": job_id if job_id in app.state.appliance_jobs else "",
+    })
+
+
+@app.put("/admin/appliances/{draft_id}/images/{filename}")
+async def upload_appliance_image(request: Request, draft_id: str, filename: str):
+    """Receive one disk as the raw request body and write it straight into the store (no temporary copy)."""
+    appliance_admin(request)
+    draft = appliance_draft(draft_id)
+    if filename not in draft["images"]:
+        raise HTTPException(404, "This appliance does not use that file.")
+    expected, target, store = draft["images"][filename], GNS3_IMAGES_DIR / filename, appliance_store_info()
+    if not store["writable"]:
+        raise HTTPException(409, f"The portal cannot write to {store['path']}. On the server run: sudo setfacl -R -m u:{store['user']}:rwX {store['path']}")
+    if target.exists():
+        raise HTTPException(409, f"{filename} is already in the store. Existing images are never replaced, because labs may use them.")
+    length = int(request.headers.get("content-length") or 0)
+    if length > MAX_APPLIANCE_IMAGE_BYTES:
+        raise HTTPException(413, f"Disk images are limited to {format_storage_size(MAX_APPLIANCE_IMAGE_BYTES)} (PORTAL_MAX_APPLIANCE_IMAGE_BYTES).")
+    if length and length + 2**30 > store["free_bytes"]:
+        raise HTTPException(507, f"Not enough free space in {store['path']}: {format_storage_size(store['free_bytes'])} free, {format_storage_size(length)} needed.")
+    part = GNS3_IMAGES_DIR / f".{filename}.{uuid.uuid4().hex}.part"
+    digest, written = hashlib.md5(usedforsecurity=False), 0
+    try:
+        with part.open("wb") as out:
+            async for chunk in request.stream():
+                written += len(chunk)
+                if written > MAX_APPLIANCE_IMAGE_BYTES:
+                    raise HTTPException(413, "That file is larger than the allowed disk size.")
+                digest.update(chunk)
+                await asyncio.to_thread(out.write, chunk)
+        if expected["size"] and written != expected["size"]:
+            raise HTTPException(422, f"That file is {format_storage_size(written)}; the appliance file says {format_storage_size(expected['size'])}. Upload the exact disk it names.")
+        if expected["md5"] and digest.hexdigest() != expected["md5"]:
+            raise HTTPException(422, "That file does not match the checksum in the appliance file. Upload the exact disk it names.")
+        if target.exists():
+            raise HTTPException(409, f"{filename} appeared in the store meanwhile. Nothing was replaced.")
+        os.chmod(part, 0o644)
+        os.rename(part, target)
+    except OSError:
+        portal_logger.exception("appliance_upload_failed file=%s", filename)
+        raise HTTPException(500, "The disk could not be written. Check the folder's permissions and free space.")
     finally:
-        for item in [appliance_file, *image_files]:
-            await item.close()
-    audit(audit_actor(request), "publish_appliance", template["name"], {"images_uploaded": uploaded, "images_reused": [name for name in needed if name not in uploaded]})
-    return back(f"Published {template['name']}. It is available in every lab now.", "message")
+        part.unlink(missing_ok=True)
+    audit(audit_actor(request), "upload_appliance_image", filename, {"bytes": written})
+    return JSONResponse({"ok": True})
+
+
+@app.post("/admin/appliances/{draft_id}/publish")
+async def publish_appliance(request: Request, draft_id: str, notes: str = Form("")):
+    appliance_admin(request)
+    draft = appliance_draft(draft_id)
+    back = f"/admin/appliances/{draft_id}"
+    states = await asyncio.to_thread(appliance_image_states, draft["images"])
+    if blocked := [item["name"] for item in states if item["state"] not in {"ready", "found"}]:
+        return RedirectResponse(f"{back}?error={quote_plus('Not ready: ' + ', '.join(blocked))}", status_code=303)
+    if any(item.get("name") == draft["template"]["name"] for item in await gns3("GET", "/v2/templates") or []):
+        return RedirectResponse(f"{back}?error={quote_plus('A template with that name already exists. Nothing was changed.')}", status_code=303)
+    if any(job.get("status") == "working" and job.get("draft_id") == draft_id for job in app.state.appliance_jobs.values()):
+        return RedirectResponse(back, status_code=303)
+    job_id = uuid.uuid4().hex
+    prune_jobs(app.state.appliance_jobs)
+    app.state.appliance_jobs[job_id] = job = {"draft_id": draft_id, "audit_actor": audit_actor(request), "actor": current_user(request), "status": "working", "progress_percent": 0, "message": "Starting…"}
+    spawn(run_appliance_job(job, draft, states, notes))
+    return RedirectResponse(f"{back}?job={job_id}", status_code=303)
+
+
+@app.get("/admin/appliance-jobs/{job_id}")
+async def appliance_job_status(request: Request, job_id: str):
+    appliance_admin(request)
+    job = app.state.appliance_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found. It may have been cleared after a portal restart.")
+    return JSONResponse({key: job.get(key) for key in ("status", "progress_percent", "message")})
 
 
 @app.post("/admin/impersonate/{username}")
@@ -1961,7 +2197,7 @@ async def create_lab_template(request: Request, project_id: str, snapshot_id: st
         "actor": current_user(request), "audit_actor": audit_actor(request), "approved": approved,
         "status": "copying", "progress_percent": 0, "message": "Copying the backup into the template archive…",
     }
-    asyncio.create_task(run_template_job(job, source))
+    spawn(run_template_job(job, source))
     return RedirectResponse(f"/projects/{project_id}?template_job={job_id}#backups", status_code=303)
 
 
@@ -2075,17 +2311,15 @@ async def new_lab_page(request: Request):
         return context
     user = current_user(request)
     return templates.TemplateResponse(request, "new_lab.html", {**context, "active_nav": "new_lab",
-        "lab_usage": None if has_admin_scope(request) else {"used": labs_in_use(user), "limit": lab_limit(user)}})
+        "lab_usage": None if has_admin_scope(request) else {"used": labs_in_use(user, {str(project["project_id"]) for project in context["projects"]}), "limit": lab_limit(user)}})
 
 
 @app.get("/templates", response_class=HTMLResponse)
 async def templates_page(request: Request):
     if AUTH_ENABLED and not active_portal_session(request):
         return redirect_login()
-    context = await lab_overview(request)
-    if not isinstance(context, dict):
-        return context
-    return templates.TemplateResponse(request, "templates.html", {**context, "active_nav": "templates"})
+    available_templates, pending_templates = template_lists(request)
+    return templates.TemplateResponse(request, "templates.html", {**base_context(request, "templates"), "available_templates": available_templates, "pending_templates": pending_templates})
 
 
 @app.get("/activity", response_class=HTMLResponse)
@@ -2104,6 +2338,23 @@ async def server_status_page(request: Request):
         return redirect_login()
     require_permission(request, "servers.view", portal_wide=True)
     return templates.TemplateResponse(request, "server_status.html", base_context(request, "status"))
+
+
+def template_lists(request: Request) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Approved templates everyone may use, and the pending ones this user may see."""
+    available_templates: list[dict[str, Any]] = []
+    pending_templates: list[dict[str, Any]] = []
+    if AUTH_ENABLED:
+        templates_to_show = approved_templates()
+        pending_source = templates_for_user(current_user(request), include_owned=has_admin_scope(request) or admin_permission(request, "templates.approve"))
+        archive_root = LAB_TEMPLATE_DIR.resolve(strict=True)
+        for template in templates_to_show + [item for item in pending_source if item.get("approval_status") == "pending"]:
+            try:
+                Path(str(template.get("archive_path") or "")).resolve(strict=True).relative_to(archive_root)
+            except (OSError, ValueError):
+                continue  # archive missing or outside the template folder
+            (available_templates if template.get("approval_status") == "approved" else pending_templates).append(template)
+    return available_templates, pending_templates
 
 
 async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
@@ -2138,27 +2389,7 @@ async def lab_overview(request: Request) -> dict[str, Any] | HTMLResponse:
             snapshot = next((item for item in source_snapshots if str(item.get("snapshot_id")) == shared["snapshot_id"]), None)
             if snapshot:
                 shared_backup_sources.append({"project_id": shared["project_id"], "snapshot_id": shared["snapshot_id"], "project_name": source_project.get("name", "Shared lab"), "snapshot_name": snapshot.get("name", "Unnamed backup")})
-    available_templates: list[dict[str, Any]] = []
-    pending_templates: list[dict[str, Any]] = []
-    if AUTH_ENABLED:
-        templates_to_show = approved_templates()
-        pending_source = templates_for_user(current_user(request), include_owned=has_admin_scope(request) or admin_permission(request, "templates.approve"))
-        for template in templates_to_show:
-            archive_path = Path(str(template.get("archive_path") or ""))
-            try:
-                archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
-            except (OSError, ValueError):
-                continue
-            available_templates.append(template)
-        for template in pending_source:
-            if template.get("approval_status") != "pending":
-                continue
-            archive_path = Path(str(template.get("archive_path") or ""))
-            try:
-                archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
-            except (OSError, ValueError):
-                continue
-            pending_templates.append(template)
+    available_templates, pending_templates = template_lists(request)
     # One query each for owners and shares, instead of several per lab.
     with db.connect() as connection:
         owners = {str(row[0]): str(row[1]) for row in connection.execute("SELECT project_id, username FROM lab_owners").fetchall()}
@@ -2239,10 +2470,15 @@ async def create_project(request: Request, name: str = Form(...)):
     name = name.strip()
     if not name or len(name) > 80:
         return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303)
-    if refused := lab_limit_refusal(request):
+    if refused := await lab_limit_refusal(request):
         return refused
-    project = await gns3("POST", "/v2/projects", json={"name": name})
-    set_lab_owner(project["project_id"], user)
+    reservations = app.state.lab_reservations
+    reservations[user] = reservations.get(user, 0) + 1
+    try:
+        project = await gns3("POST", "/v2/projects", json={"name": name})
+        set_lab_owner(project["project_id"], user)
+    finally:
+        reservations[user] -= 1
     linked, link_reason = await asyncio.to_thread(
         ensure_hdd_snapshot_link,
         await gns3("GET", f"/v2/projects/{project['project_id']}"),
@@ -2353,7 +2589,7 @@ async def create_snapshot(request: Request, project_id: str, name: str = Form(..
     job = {"project_id": project_id, "name": name, "actor": user, "audit_actor": audit_actor(request), "status": "queued", "progress_percent": 0, "progress_is_estimated": False, "message": "Backup queued…", "snapshot_id": None, "cancel_requested": False, "created_at": datetime.now(timezone.utc).isoformat(), "completed_at": None}
     prune_jobs(app.state.backup_jobs)
     app.state.backup_jobs[job_id] = job
-    asyncio.create_task(run_backup_job(job))
+    spawn(run_backup_job(job))
     return RedirectResponse(f"/projects/{project_id}?backup_job={job_id}", status_code=303)
 
 
@@ -2424,6 +2660,13 @@ async def download_snapshot(request: Request, project_id: str, snapshot_id: str)
 ACTIVE_IMPORT_STATES = frozenset({"preparing", "importing"})
 
 
+def spawn(coroutine: Any) -> None:
+    """Run a job in the background. The event loop only keeps a weak reference, so hold one."""
+    task = asyncio.create_task(coroutine)
+    app.state.tasks.add(task)
+    task.add_done_callback(app.state.tasks.discard)
+
+
 def prune_jobs(jobs: dict[str, dict[str, Any]], keep: int = 100) -> None:
     """Drop all but the newest finished jobs; running jobs are never dropped."""
     finished = [key for key, job in jobs.items() if job.get("status") in {"completed", "failed", "cancelled"}]
@@ -2436,15 +2679,17 @@ def import_running() -> bool:
     return any(job.get("status") in ACTIVE_IMPORT_STATES for job in app.state.import_jobs.values())
 
 
-def start_import(request: Request, name: str, message: str, **source: Any) -> tuple[RedirectResponse, bool]:
+async def start_import(request: Request, name: str, message: str, **source: Any) -> tuple[RedirectResponse, bool]:
     """Queue a new powered-off lab from a backup, template, retained backup or upload. Returns (redirect, queued)."""
     new_name = name.strip()
     if not new_name or len(new_name) > 80:
         return RedirectResponse("/?error=Use+a+lab+name+between+1+and+80+characters", status_code=303), False
     if import_running():
         return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303), False
-    if refused := lab_limit_refusal(request):
+    if refused := await lab_limit_refusal(request):
         return refused, False
+    if import_running():  # another import may have started while the limit was checked
+        return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303), False
     prune_jobs(app.state.import_jobs)
     job_id = str(uuid.uuid4())
     job = {
@@ -2454,23 +2699,23 @@ def start_import(request: Request, name: str, message: str, **source: Any) -> tu
         "status": "preparing", "progress_percent": 0, "message": message, "project_id": None,
     }
     app.state.import_jobs[job_id] = job
-    asyncio.create_task(run_snapshot_import_job(job))
+    spawn(run_snapshot_import_job(job))
     return RedirectResponse(f"/?import_job={job_id}", status_code=303), True
 
 
-def start_snapshot_import(request: Request, project_id: str, snapshot_id: str, name: str) -> RedirectResponse:
+async def start_snapshot_import(request: Request, project_id: str, snapshot_id: str, name: str) -> RedirectResponse:
     """Queue a distinct stopped lab from a source project's native snapshot."""
     require_project_access(request, project_id)
     if not GNS3_PROJECTS_DIR:
         return RedirectResponse("/?error=Configure+GNS3_PROJECTS_DIR+before+creating+a+lab+from+a+backup", status_code=303)
-    return start_import(request, name, "Import queued…", source_project_id=project_id, snapshot_id=snapshot_id)[0]
+    return (await start_import(request, name, "Import queued…", source_project_id=project_id, snapshot_id=snapshot_id))[0]
 
 
 @app.post("/backup-imports")
 async def create_lab_from_backup(request: Request, source_project_id: str = Form(...), snapshot_id: str = Form(...), name: str = Form(...)):
     """Create a new lab from a selected backup on the dashboard."""
     require_permission(request, "labs.create")
-    return start_snapshot_import(request, source_project_id, snapshot_id, name)
+    return await start_snapshot_import(request, source_project_id, snapshot_id, name)
 
 
 @app.post("/shared-backup-imports")
@@ -2481,7 +2726,7 @@ async def create_lab_from_shared_backup(request: Request, source_project_id: str
         raise HTTPException(404, "Shared backup not found.")
     if not GNS3_PROJECTS_DIR:
         return RedirectResponse("/?error=Configure+GNS3_PROJECTS_DIR+before+creating+a+lab+from+a+backup", status_code=303)
-    response, queued = start_import(request, name, "Shared backup queued for import…", source_project_id=source_project_id, snapshot_id=snapshot_id, consume_backup_share=True)
+    response, queued = await start_import(request, name, "Shared backup queued for import…", source_project_id=source_project_id, snapshot_id=snapshot_id, consume_backup_share=True)
     if queued:
         audit(audit_actor(request), "create_lab_from_shared_backup", source_project_id, {"snapshot_id": snapshot_id, "new_name": name.strip()})
     return response
@@ -2498,7 +2743,7 @@ async def create_lab_from_template(request: Request, template_id: str = Form(...
         archive_path.resolve(strict=True).relative_to(LAB_TEMPLATE_DIR.resolve(strict=True))
     except (OSError, ValueError):
         return RedirectResponse("/?error=Template+archive+is+not+available", status_code=303)
-    response, queued = start_import(request, name, "Lab template queued for import…", template_path=str(archive_path), template_id=template_id)
+    response, queued = await start_import(request, name, "Lab template queued for import…", template_path=str(archive_path), template_id=template_id)
     if queued:
         audit(audit_actor(request), "create_lab_from_template", template_id, {"new_name": name.strip()})
     return response
@@ -2516,7 +2761,7 @@ async def create_lab_from_retained_backup(request: Request, backup_id: str = For
     record = retained_backup_record(request, backup_id)
     if not record or not Path(record["archive_path"]).is_file():
         return RedirectResponse("/?error=Retained+backup+not+found", status_code=303)
-    return start_import(request, name, "Retained backup queued for import…", retained_path=record["archive_path"])[0]
+    return (await start_import(request, name, "Retained backup queued for import…", retained_path=record["archive_path"]))[0]
 
 
 @app.post("/retained-backups/delete")
@@ -2552,7 +2797,7 @@ async def upload_backup_as_lab(request: Request, name: str = Form(...), backup_f
         return RedirectResponse("/?error=Upload+a+.gns3snapshot+or+.gns3project+backup+file", status_code=303)
     if import_running():
         return RedirectResponse("/?error=Another+backup+import+is+already+running", status_code=303)
-    if refused := lab_limit_refusal(request):
+    if refused := await lab_limit_refusal(request):
         return refused
     upload_path = UPLOAD_DIR / f"{uuid.uuid4()}{suffix}"
     written = 0
@@ -2570,7 +2815,7 @@ async def upload_backup_as_lab(request: Request, name: str = Form(...), backup_f
         return RedirectResponse("/?error=The+portal+could+not+store+the+uploaded+backup", status_code=303)
     finally:
         await backup_file.close()
-    response, queued = start_import(request, new_name, "Uploaded backup queued for import…", upload_path=str(upload_path))
+    response, queued = await start_import(request, new_name, "Uploaded backup queued for import…", upload_path=str(upload_path))
     if not queued:
         upload_path.unlink(missing_ok=True)  # Another import started while this file was uploading.
         return response
@@ -2582,7 +2827,7 @@ async def upload_backup_as_lab(request: Request, name: str = Form(...), backup_f
 async def clone_snapshot_as_lab(request: Request, project_id: str, snapshot_id: str, name: str = Form(...)):
     """Legacy endpoint retained for existing links; it returns to the dashboard."""
     require_permission(request, "labs.create")
-    return start_snapshot_import(request, project_id, snapshot_id, name)
+    return await start_snapshot_import(request, project_id, snapshot_id, name)
 
 
 def can_see_job(request: Request, job: dict[str, Any]) -> bool:

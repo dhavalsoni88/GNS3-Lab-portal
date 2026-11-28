@@ -13,6 +13,9 @@ loads them from `/opt/gns3-lab-portal/.env`; start from
 | `GNS3_WEBUI_URL` | `GNS3_URL` | Address users' browsers use for **Open in GNS3** links, for example a reverse-proxied URL. |
 | `GNS3_WEBUI_SERVER_ID` | `1` | Server number in the bundled GNS3 web UI's project links. |
 | `GNS3_TIMEOUT_SECONDS` | `3600` | Longest wait for a single controller request, such as creating a snapshot. |
+| `GNS3_IMAGES_DIR` | `<GNS3 folder>/images/QEMU` | The **appliance store**: GNS3's QEMU image folder, where published appliance disks go. `<GNS3 folder>` is the parent of `GNS3_PROJECTS_DIR`, or `/home/gns3/GNS3`. The portal service user needs write access. |
+| `PORTAL_APPLIANCE_SEARCH_DIRS` | `<GNS3 folder>/images` | Comma-separated folders searched (four levels deep) for disks that already exist on the server. A disk found there is moved into the store when its appliance is published. |
+| `PORTAL_MAX_APPLIANCE_IMAGE_BYTES` | `549755813888` (512 GiB) | Largest single appliance disk the portal accepts. |
 | `GNS3_PROJECTS_DIR` | empty | Absolute GNS3 projects folder. Enables backup sizes, downloads and creating labs from backups. |
 | `GNS3_SNAPSHOTS_DIR` | empty | Separate snapshot root when snapshots live on another disk. See [storage.md](storage.md). |
 | `GNS3_MONITOR_COMPUTE_ID` | first compute | Compute whose CPU and memory the Server status page shows. |
@@ -58,7 +61,7 @@ Active Directory and SAML providers are configured in the portal, under
 | `RETAINED_BACKUP_DIR` | `/mnt/HDD_STORE/my-lab-retained-backups` | Archive for backups kept when a lab is deleted. |
 | `LAB_TEMPLATE_DIR` | `/mnt/HDD_STORE/my-lab-templates` | Independent copies of published templates. |
 | `PORTAL_UPLOAD_DIR` | `./data/uploads` | Temporary space for uploaded backup files. The systemd unit also points `TMPDIR` here, so uploads never fill the root disk. |
-| `PORTAL_MAX_UPLOAD_BYTES` | `53687091200` (50 GiB) | Largest backup file users may upload. Keep Nginx `client_max_body_size` in step. |
+| `PORTAL_MAX_UPLOAD_BYTES` | `53687091200` (50 GiB) | Largest backup file users may upload. The Nginx sample sets `client_max_body_size 0`, so this limit is the one that applies. |
 | `PORTAL_AVATAR_DIR` | `./data/avatars` | Private profile photos. |
 
 ## Backups, logs and monitoring

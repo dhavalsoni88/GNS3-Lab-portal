@@ -20,9 +20,35 @@ are kept under **Upgrade notes**. For upgrading an installation, see
   `004_lab_limit` adds the column and records limit changes in the change
   history; `scripts/upgrade.sh` applies it.
 - **Publish appliances to every lab** (**Administration › Appliances**,
-  Platform Admins). Upload a QEMU `.gns3a` file and its disk images; the
-  portal verifies each image's checksum, uploads only images GNS3 lacks, and
-  registers the template. Existing templates and images are never replaced.
+  Platform Admins). Choose a QEMU `.gns3a` file and the portal shows, per
+  disk, whether the server already has it:
+  - in the **appliance store**, GNS3's QEMU image folder (`GNS3_IMAGES_DIR`,
+    shown on the page together with free space and whether it is writable);
+  - **elsewhere on the server** (`PORTAL_APPLIANCE_SEARCH_DIRS`), in which
+    case it is checked against the appliance's checksum and moved into the
+    store when publishing;
+  - or **missing**, with the exact path it must be at. Only then is an
+    upload offered. It streams straight into the store with a progress bar
+    and no temporary copy, so large disks no longer time out.
+
+  Publishing runs in the background with a progress bar and registers the
+  template; optional **Notes** appear under **Usage** in GNS3. Existing
+  templates and images are never replaced. QEMU options in an appliance file
+  are limited to a safe list, because they run on the GNS3 server. The
+  portal service user needs write access to the store (see the installation
+  guide); `scripts/upgrade.sh` says so if it lacks it.
+- **Review fixes:**
+  - The lab limit can no longer be bypassed by sending requests at the same
+    time, and labs deleted directly in GNS3 no longer count against it.
+  - The Nginx sample forwards `Host $http_host`, so sign-in works on a
+    non-standard port; `Origin: null` and the other unsafe methods (PUT,
+    PATCH, DELETE) are covered by the cross-site check.
+  - `scripts/setup-mariadb.sh` restarts MariaDB only when its audit settings
+    changed, instead of on every upgrade. CI runs `shellcheck` on the scripts.
+  - Background jobs keep a reference to their task; half-copied template
+    folders left by a crash are removed at start-up; the Templates page no
+    longer asks GNS3 about every lab; an empty "Labs allowed" box no longer
+    shows a raw error.
 
 ## v9.0.1 — Unreleased
 

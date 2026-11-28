@@ -124,6 +124,20 @@ sudo setfacl -R -m u:www-data:rX /home/gns3/GNS3/projects
 
 If snapshots live on a separate disk, also follow [storage.md](storage.md).
 
+**To publish appliances** (optional, **Administration › Appliances**), the
+portal also writes disks into GNS3's QEMU image folder, the *appliance
+store*. Give it write access there, and to any other folder whose disks it
+should be able to move into the store:
+
+```bash
+sudo setfacl -R -m u:www-data:rwX /home/gns3/GNS3/images
+sudo setfacl -R -d -m u:www-data:rwX /home/gns3/GNS3/images
+```
+
+The second line makes new files and folders inherit the access. The
+Appliances page shows the store path and says if it is not writable; change
+the path with `GNS3_IMAGES_DIR` ([configuration.md](configuration.md)).
+
 ## 6. Install and start the service
 
 ```bash

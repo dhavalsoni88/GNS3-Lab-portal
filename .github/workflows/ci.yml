@@ -37,7 +37,7 @@ jobs:
       - name: Check Python syntax
         run: python -m compileall -q app.py portal_db.py portal_auth.py scripts tests
       - name: Check shell scripts
-        run: bash -n scripts/setup-mariadb.sh && bash -n scripts/migrate-snapshots-to-hdd-store.sh && bash -n scripts/upgrade.sh
+        run: bash -n scripts/setup-mariadb.sh && bash -n scripts/migrate-snapshots-to-hdd-store.sh && bash -n scripts/upgrade.sh && shellcheck -S warning scripts/*.sh
       - name: Run tests
         env:
           PORTAL_DB_HOST: 127.0.0.1
