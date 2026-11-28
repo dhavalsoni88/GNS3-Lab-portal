@@ -81,7 +81,7 @@ At the top of **Appliance builder**, paste one of these and click **Analyse**:
 | You paste | What the builder service does |
 |---|---|
 | A `.deb` download link, or the `wget`/`curl` command that fetches it | Downloads it, pins its SHA-256, and reads its name, version, architecture (amd64 only), dependencies, installed size and the systemd services it ships |
-| A GitHub repository link | Pins the default branch's current commit and picks, in this order: a `.deb` in the latest release (as above), a `compose.yaml`/`docker-compose.yml` (installs Docker and runs it as a service, with the ports it publishes), a `Dockerfile` (builds and runs it, with its `EXPOSE` ports), or a top-level `install.sh`/`setup.sh`. The repository's licence decides whether acceptance is asked |
+| A GitHub repository link | Pins the default branch's current commit and picks, in this order: a `.deb` in the latest release (as above), a `compose.yaml`/`docker-compose.yml` at the top or up to three folders down, such as crAPI's `deploy/docker/` (installs Docker and runs it as a service with the ports it publishes; memory and CPUs are sized from its container limits; ports bound with `${VAR:-127.0.0.1}` get `VAR=0.0.0.0` so lab machines can reach them), a `Dockerfile` (builds and runs it, with its `EXPOSE` ports), or a top-level `install.sh`/`setup.sh`. The repository's licence decides whether acceptance is asked |
 | Ubuntu package names | Installs them with apt; their services are checked after the install and stopped before sealing |
 
 The result is a **draft**: requirements (CPUs, memory, disk and free space are estimated from the package

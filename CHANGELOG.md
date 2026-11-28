@@ -31,7 +31,8 @@ Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh` (it creates t
   works too) or Ubuntu package names. The builder service reads the source and writes a draft
   application: requirements estimated from the package or repository, the install, check and clean-up
   scripts (pinned by SHA-256 or commit; GitHub repositories run from a `.deb` release, docker compose, a
-  Dockerfile or `install.sh`), and notes on what to review. Review, save, build.
+  Dockerfile or `install.sh`; compose files are found in subfolders too, sized from their container
+  limits, and opened to the lab network when they bind to 127.0.0.1), and notes on what to review. Review, save, build.
 - Imported and generated applications can be **edited** in the portal.
 - Every build prints what it **measured** in the VM: disk and memory used, listening ports, running services.
 - **Import an application** from a zip: `recipe.json` with its scripts, or an ubuntu-appliance-generator
