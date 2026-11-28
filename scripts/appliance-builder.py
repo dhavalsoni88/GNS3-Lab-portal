@@ -189,7 +189,11 @@ class Build:
         self.status("running", "Cloning the Ubuntu baseline", 5)
         self.run("qemu-img", "convert", "-O", "qcow2", str(baseline), str(disk))
         self.run("qemu-img", "check", str(disk))
-        self.run("qemu-img", "resize", str(disk), f"{job['disk_gb']}G")   # also grows: the guest expands its filesystem on boot
+        current = json.loads(subprocess.run(["qemu-img", "info", "--output=json", str(disk)], capture_output=True, text=True, check=True).stdout)["virtual-size"]
+        if job["disk_gb"] * 1024**3 > current:
+            self.run("qemu-img", "resize", str(disk), f"{job['disk_gb']}G")   # the guest grows its filesystem on boot
+        else:   # never shrink: that would cut off the baseline's filesystem
+            self.say(f"Disk kept at {current // 1024**3} GiB: the baseline is already that size or larger, and a disk is never shrunk.")
         self.status("running", "Preparing temporary build access", 12)
         self.run("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "gns3-lab-builder", "-f", str(key))
         seed_dir = self.work / "seed"

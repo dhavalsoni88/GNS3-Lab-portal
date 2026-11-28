@@ -168,7 +168,7 @@ def test_recipe_icon_is_attached_when_none_is_uploaded(client, base):
 # --- the builder service, run for real against stub tools ---------------------------------------
 
 STUBS = {
-    "qemu-img": 'case "$1" in convert) for last; do :; done; src=""; for a in "$@"; do src="$prev"; prev="$a"; done; cp "$src" "$last";; esac\nexit 0\n',
+    "qemu-img": 'echo "$*" >> "$STUB_QEMU_LOG"\ncase "$1" in info) echo "{\\"virtual-size\\": $(( ${STUB_DISK_GIB:-8} * 1073741824 ))}";; convert) for last; do :; done; src=""; for a in "$@"; do src="$prev"; prev="$a"; done; cp "$src" "$last";; esac\nexit 0\n',
     "ssh-keygen": 'for a in "$@"; do last="$a"; done; echo KEY > "$last"; echo "ssh-ed25519 AAAA gns3-lab-builder" > "$last.pub"\n',
     "xorriso": 'for a in "$@"; do if [ "$prev" = "-o" ]; then touch "$a"; fi; prev="$a"; done\n',
     "qemu-system-x86_64": 'while [ ! -f "$STUB_OFF" ]; do sleep 0.1; done\n',
@@ -187,6 +187,7 @@ def service(tmp_path, monkeypatch):
     monkeypatch.setenv("STUB_OFF", str(tmp_path / "vm-off"))
     monkeypatch.setenv("STUB_STAGES", str(tmp_path / "stages"))
     monkeypatch.setenv("STUB_FAIL", "")
+    monkeypatch.setenv("STUB_QEMU_LOG", str(tmp_path / "qemu-img.log"))
     (tmp_path / "stages").mkdir()
     monkeypatch.setenv("PORTAL_BUILDER_DIR", str(tmp_path / "b"))
     monkeypatch.setenv("GNS3_IMAGES_DIR", str(tmp_path / "images"))
@@ -350,3 +351,17 @@ def test_import_view_and_delete_in_the_portal(client, base):
     with pb_db.connect() as connection:
         actions = {row["action"] for row in connection.execute("SELECT action FROM audit_log WHERE target='elk'").fetchall()}
     assert {"builder_recipe_imported", "builder_recipe_deleted"} <= actions
+
+
+def test_the_disk_is_grown_but_never_shrunk(service, monkeypatch):
+    module, tmp = service
+    store = pb.JobStore(tmp / "b")
+    monkeypatch.setenv("STUB_DISK_GIB", "32")   # like the ironman baseline: 32 GiB, more than DVWA's 16
+    job_id = store.create(make(recipe="dvwa", name="Small"))
+    module.Build(store.path(job_id)).execute()
+    assert store.status(job_id)["state"] == "succeeded", (store.path(job_id) / "console.log").read_text()
+    assert "resize" not in (tmp / "qemu-img.log").read_text() and "Disk kept at 32 GiB" in (store.path(job_id) / "console.log").read_text()
+    monkeypatch.setenv("STUB_DISK_GIB", "8")
+    grown = store.create(make(recipe="dvwa", name="Grown", disk_gb="20"))
+    module.Build(store.path(grown)).execute()
+    assert store.status(grown)["state"] == "succeeded" and any(line.startswith("resize") and line.endswith(" 20G") for line in (tmp / "qemu-img.log").read_text().splitlines())
