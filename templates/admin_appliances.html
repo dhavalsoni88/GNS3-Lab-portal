@@ -1,47 +1,52 @@
 {% extends "base.html" %}
-{% block title %}Appliances · GNS3 Lab Portal{% endblock %}
+{% block title %}Appliance library · GNS3 Lab Portal{% endblock %}
 {% block content %}
 <div class="page-head">
-  <div><h1>Appliances</h1><p class="subtitle">Publish a GNS3 appliance once and it appears in every lab. Existing appliances and disk images are never changed or removed.</p></div>
+  <div><h1>Appliance library</h1><p class="subtitle">Appliances published here appear in every lab. Existing appliances and disk images are never changed or removed.</p></div>
+  <div class="actions"><a class="button primary" href="/admin/appliance-builder">Build an appliance</a></div>
 </div>
 
-<section class="card form-stack">
-  <h2>Where appliance disks are stored</h2>
-  <p style="margin:0"><code>{{ store.path }}</code> on the GNS3 server. This is GNS3's own QEMU image folder, so every lab sees a disk as soon as it is there.</p>
-  {% if not store.exists %}
-    <p class="error" role="alert">That folder does not exist. Set <code>GNS3_IMAGES_DIR</code> in <code>.env</code> to GNS3's QEMU images folder.</p>
-  {% elif not store.writable %}
-    <p class="error" role="alert">The portal cannot write there, so it cannot add or move disks. On the server run: <code>sudo setfacl -R -m u:{{ store.user }}:rwX {{ store.path }}</code></p>
-  {% else %}
-    <p class="muted" style="margin:0">Writable. {{ store.free_bytes | storage_size }} free.</p>
-  {% endif %}
-  <p class="muted" style="margin:0">Disks already on the server are looked for under {% for path in store.search_dirs %}<code>{{ path }}</code>{% if not loop.last %}, {% endif %}{% endfor %} and moved into the store when you publish (<code>PORTAL_APPLIANCE_SEARCH_DIRS</code> changes this).</p>
-</section>
+<div class="split">
+  <section class="stack">
+    {% if load_error %}<p class="error" role="alert">{{ load_error }}</p>{% endif %}
+    <div class="table-card">
+      <table class="data responsive">
+        <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Category</th><th scope="col">Source</th></tr></thead>
+        <tbody>{% for template in gns3_templates %}
+          <tr>
+            <td class="primary-cell"><span class="cell-title">{{ template.name }}</span></td>
+            <td data-label="Type">{{ template.template_type }}</td>
+            <td data-label="Category">{{ template.category }}</td>
+            <td data-label="Source">{% if template.builtin %}Built in{% else %}Added{% endif %}</td>
+          </tr>{% else %}
+          <tr><td class="empty" colspan="4">No appliances found.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
 
-<section class="card form-stack">
-  <h2>Publish an appliance</h2>
-  <form class="form-stack" method="post" action="/admin/appliances" enctype="multipart/form-data">
-    <label>Appliance file (.gns3a)<input type="file" name="appliance_file" accept=".gns3a,application/json" required></label>
-    <label>Version <span class="muted">(optional; the first version in the file is used if blank)</span><input name="version" maxlength="100" placeholder="e.g. 2019"></label>
-    <div><button class="primary big">Check disks</button></div>
-  </form>
-  <p class="muted" style="margin:0">The next page shows which disks the server already has and where any missing one must go. Get appliance files from the GNS3 marketplace or the vendor. QEMU appliances only for now.</p>
-</section>
-
-<h2>Appliances in GNS3</h2>
-{% if load_error %}<p class="error" role="alert">{{ load_error }}</p>{% endif %}
-<div class="table-card">
-  <table class="data responsive">
-    <thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Category</th><th scope="col">Source</th></tr></thead>
-    <tbody>{% for template in gns3_templates %}
-      <tr>
-        <td class="primary-cell"><span class="cell-title">{{ template.name }}</span></td>
-        <td data-label="Type">{{ template.template_type }}</td>
-        <td data-label="Category">{{ template.category }}</td>
-        <td data-label="Source">{% if template.builtin %}Built in{% else %}Added{% endif %}</td>
-      </tr>{% else %}
-      <tr><td class="empty" colspan="4">No appliances found.</td></tr>{% endfor %}
-    </tbody>
-  </table>
+  <aside>
+    <section class="card form-stack">
+      <h2>Import an appliance file</h2>
+      <form class="form-stack" method="post" action="/admin/appliances" enctype="multipart/form-data">
+        <label>Appliance file (.gns3a)<input type="file" name="appliance_file" accept=".gns3a,application/json" required></label>
+        <label>Version <span class="muted">(optional)</span><input name="version" maxlength="100" placeholder="2019"></label>
+        <div><button class="primary">Check disks</button></div>
+      </form>
+      <p class="muted" style="margin:0">The next page shows which disks the server already has and where a missing one must go. Get files from the GNS3 marketplace or the vendor. QEMU appliances only.</p>
+    </section>
+    <section class="card form-stack">
+      <h2>Appliance store</h2>
+      <p class="mono" style="margin:0;word-break:break-all">{{ store.path }}</p>
+      {% if not store.exists %}
+        <p class="error" role="alert">That folder does not exist. Set <code>GNS3_IMAGES_DIR</code> in <code>.env</code> to GNS3's QEMU images folder.</p>
+      {% elif not store.writable %}
+        <p class="error" role="alert">The portal cannot write there. On the server run <code>sudo setfacl -R -m u:{{ store.user }}:rwX {{ store.path }}</code></p>
+      {% else %}
+        <p class="pill ok" style="margin:0">Writable · {{ store.free_bytes | storage_size }} free</p>
+      {% endif %}
+      <p class="muted" style="margin:0">Disks already on the server are looked for under {% for path in store.search_dirs %}<code>{{ path }}</code>{% if not loop.last %}, {% endif %}{% endfor %} and moved into the store when you publish.</p>
+    </section>
+  </aside>
 </div>
 {% endblock %}

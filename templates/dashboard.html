@@ -31,24 +31,24 @@
 {% endif %}
 
 <div class="toolbar">
-  <div class="chips" role="group" aria-label="Filter by status">
-    <button type="button" class="chip" data-status-filter="all" aria-pressed="true">All {{ projects | length }}</button>
-    <button type="button" class="chip" data-status-filter="running" aria-pressed="false">Running {{ running_lab_count }}</button>
-    <button type="button" class="chip" data-status-filter="stopped" aria-pressed="false">Not running {{ projects | length - running_lab_count }}</button>
-  </div>
-  <div class="chips">
+  <div class="group">
+    <div class="chips" role="group" aria-label="Filter by status">
+      <button type="button" class="chip" data-status-filter="all" aria-pressed="true">All {{ projects | length }}</button>
+      <button type="button" class="chip" data-status-filter="running" aria-pressed="false">Running {{ running_lab_count }}</button>
+      <button type="button" class="chip" data-status-filter="stopped" aria-pressed="false">Stopped {{ projects | length - running_lab_count }}</button>
+    </div>
     {% if admin_view %}
     <div class="chips" role="group" aria-label="Filter by owner">
       <button type="button" class="chip" data-lab-tab="all" aria-pressed="true">Everyone</button>
-      <button type="button" class="chip" data-lab-tab="mine" aria-pressed="false">Mine &amp; unassigned ({{ my_lab_count }})</button>
-      <button type="button" class="chip" data-lab-tab="user" aria-pressed="false">Other users ({{ user_lab_count }})</button>
+      <button type="button" class="chip" data-lab-tab="mine" aria-pressed="false">Mine &amp; unassigned {{ my_lab_count }}</button>
+      <button type="button" class="chip" data-lab-tab="user" aria-pressed="false">Others {{ user_lab_count }}</button>
     </div>
     {% endif %}
-    <label class="search"><span class="visually-hidden">Search labs</span>
-      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.6"/></svg>
-      <input type="search" data-lab-search placeholder="Search by lab or owner">
-    </label>
   </div>
+  <label class="search"><span class="visually-hidden">Search labs</span>
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.5"/></svg>
+    <input type="search" data-lab-search placeholder="Search">
+  </label>
 </div>
 
 <div class="table-card">
@@ -63,7 +63,7 @@
           <a class="cell-title" href="/projects/{{ project.project_id }}" title="Lab ID: {{ project.project_id }}">{{ lab_name }}</a>
           <div class="cell-meta">{{ project.node_total }} node{{ '' if project.node_total == 1 else 's' }}{% if project.shared_with %} · shared with {{ project.shared_with | join(', ') }}{% elif project.owner != user and not admin_view %} · shared by {{ project.owner }}{% endif %}</div>
         </td>
-        <td data-label="Status">{% if project.is_running %}<span class="pill ok">Running · {{ project.node_running }} of {{ project.node_total }}</span>{% else %}<span class="pill off">Stopped</span>{% endif %}</td>
+        <td data-label="Status">{% if project.node_total %}<span class="nodes" aria-hidden="true">{% for n in range(project.node_total if project.node_total < 12 else 12) %}<i{% if n < project.node_running %} class="on"{% endif %}></i>{% endfor %}</span>{% endif %}{% if project.is_running %}<span class="pill ok">Running · {{ project.node_running }} of {{ project.node_total }}</span>{% else %}<span class="pill off">Stopped</span>{% endif %}</td>
         {% if admin_view %}<td data-label="Owner">{% if project.owner == 'Unassigned' %}<span class="pill warn">Needs an owner</span>{% else %}{{ project.owner }}{% endif %}</td>{% endif %}
         <td data-label="Last backup">{% if project.last_backup_at %}<time class="local-time" datetime="{{ project.last_backup_at }}">—</time>{% else %}<span class="muted">None</span>{% endif %}</td>
         <td class="actions">
@@ -74,7 +74,7 @@
             {% else %}
             <form method="post" action="/projects/{{ project.project_id }}/start" onsubmit="return confirm('Start all stopped nodes in this lab?')"><button type="submit">Start</button></form>
             {% endif %}
-            <a class="button primary" target="_blank" rel="noopener" href="{{ project.access_lab_url }}">Open<span aria-hidden="true"> ↗</span><span class="visually-hidden"> {{ lab_name }} in GNS3 (new tab)</span></a>
+            <a class="button" target="_blank" rel="noopener" href="{{ project.access_lab_url }}">Open<span aria-hidden="true"> ↗</span><span class="visually-hidden"> {{ lab_name }} in GNS3 (new tab)</span></a>
             <details class="menu">
               <summary class="button icon-button" aria-label="More actions for {{ lab_name }}">⋯</summary>
               <div class="menu-panel wide">

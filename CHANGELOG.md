@@ -24,6 +24,11 @@ Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh`, then run
 - Applications are folders under `deploy/builder/recipes/`; add one without
   changing code.
 - Published appliances can carry an icon (uploaded to GNS3 as a symbol).
+- **New look: graphite.** Quiet graphite surfaces in light and dark, no colour accent: the primary action is the ink colour, and colour is used only for status (a small link-state dot) and errors. System fonts, line icons in the sidebar, weights 400 and 500, sentence-case labels, a visible focus ring.
+- **Navigation grouped by task:** Workspace, Appliances (Library, Builder), Access (Users, Roles & groups, Identity providers), Server (Status, HTTPS).
+- **Labs:** one toolbar for status filter, owner filter and search; each lab shows a dot per node (green when running); *Open* is a secondary button so *New lab* is the one primary action.
+- **Appliance builder** is a three-step form with a live summary; the build page shows a terminal-style console beside a step list. **HTTPS** shows the certificate on top and the three methods as tabs. **Appliance library** puts the list first and import and store details beside it.
+- **Sign-in page** shows what the product does, with a small topology drawing.
 - Not yet run against a real KVM server: the VM steps are tested only with
   stub tools. Please report what the console shows on the first build.
 

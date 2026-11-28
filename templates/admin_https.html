@@ -28,8 +28,13 @@
   {% else %}<p class="muted" style="margin:0">No certificate is installed yet.</p>{% endif %}
 </section>
 
-<section class="card form-stack">
-  <h2>Self-signed certificate</h2>
+<section class="card">
+  <div class="tabs" role="tablist" aria-label="Certificate method">
+    <button type="button" class="tab" role="tab" data-tab="self" aria-selected="true">Self-signed</button>
+    <button type="button" class="tab" role="tab" data-tab="csr" aria-selected="false">Signing request (CSR){% if pending %} <span class="muted">{{ pending | length }}</span>{% endif %}</button>
+    <button type="button" class="tab" role="tab" data-tab="upload" aria-selected="false">Upload</button>
+  </div>
+  <div class="form-stack" data-panel="self">
   <p class="muted" style="margin:0">Quick and free, but browsers show a warning until you trust it. Good for a lab, or as a first step. It is installed straight away.</p>
   <form class="form-stack" method="post" action="/admin/https/self-signed">
     <label>FQDN<input name="fqdn" required maxlength="64" placeholder="lab.example.com" autocomplete="off"></label>
@@ -40,10 +45,8 @@
     </div>
     <div><button class="primary">Create and install</button></div>
   </form>
-</section>
-
-<section class="card form-stack" id="pending">
-  <h2>Certificate from a certificate authority (CSR)</h2>
+</div>
+  <div class="form-stack" data-panel="csr" id="pending">
   <p class="muted" style="margin:0">1. Create a signing request. The private key is made here and never leaves the server. 2. Send the request to your CA (a public one, or your company's). 3. Paste or upload the certificate it returns, together with any intermediate certificates.</p>
   <form class="form-stack" method="post" action="/admin/https/csr">
     <label>FQDN<input name="fqdn" required maxlength="64" placeholder="lab.example.com" autocomplete="off"></label>
@@ -78,10 +81,8 @@
   </div>
   {% endfor %}
   {% endif %}
-</section>
-
-<section class="card form-stack">
-  <h2>Upload a certificate and its private key</h2>
+</div>
+  <div class="form-stack" data-panel="upload">
   {% if not https_now %}<p class="error" role="alert">Disabled while this page is on plain HTTP: a private key must not travel unencrypted. Install a self-signed certificate above first, then open this page over HTTPS. A signing request (above) never sends a key.</p>{% endif %}
   <form class="form-stack" method="post" action="/admin/https/upload" enctype="multipart/form-data">
     <fieldset {% if not https_now %}disabled{% endif %} class="form-stack" style="border:0;padding:0;margin:0">
@@ -95,5 +96,13 @@
     </fieldset>
   </form>
   <p class="muted" style="margin:0">The key is checked against the certificate and kept on the server in <code>{{ tls_dir }}</code>, readable only by the portal and root.</p>
+</div>
+</section>
 </section>
 {% endblock %}
+{% block scripts %}<script>
+(()=>{const tabs=[...document.querySelectorAll('[data-tab]')];if(!tabs.length)return;
+function show(name){tabs.forEach(t=>t.setAttribute('aria-selected',String(t.dataset.tab===name)));document.querySelectorAll('[data-panel]').forEach(p=>p.hidden=p.dataset.panel!==name)}
+tabs.forEach(t=>t.addEventListener('click',()=>show(t.dataset.tab)));
+show(location.hash==='#pending'||document.querySelector('[data-panel=csr] .card')?'csr':'self')})();
+</script>{% endblock %}
