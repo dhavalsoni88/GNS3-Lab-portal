@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for GNS3 Lab Portal certificate changes
+
+[Path]
+# The portal writes a new token here after installing a certificate (it closes the file when done).
+PathChanged=@TLS_DIR@/reload-request
+Unit=gns3-lab-portal-tls.service
+
+[Install]
+WantedBy=multi-user.target

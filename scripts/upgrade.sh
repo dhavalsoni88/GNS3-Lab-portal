@@ -115,6 +115,9 @@ UNIT=/etc/systemd/system/$SERVICE.service
 install -m 644 "$PORTAL_DIR/deploy/systemd/$SERVICE.service" "$UNIT"
 install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0750 "$PORTAL_DIR/data" "$PORTAL_DIR/data/uploads" "$PORTAL_DIR/data/avatars"
 systemctl daemon-reload
+if [[ -e /usr/local/libexec/gns3-lab-portal-apply-tls ]]; then   # HTTPS was set up with setup-https.sh
+  install -m 0755 -o root -g root "$PORTAL_DIR/scripts/apply-tls.sh" /usr/local/libexec/gns3-lab-portal-apply-tls
+fi
 
 step "Starting the portal"
 systemctl start "$SERVICE"

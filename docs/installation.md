@@ -149,7 +149,15 @@ sudo systemctl status gns3-lab-portal --no-pager
 
 ## 7. Publish it over HTTPS
 
-Copy [`deploy/nginx/gns3-lab-portal.conf`](../deploy/nginx/gns3-lab-portal.conf)
+**Recommended:** one command sets up Nginx, a first self-signed certificate
+and the reload helper. Afterwards certificates are managed from the portal
+(**Administration › HTTPS**), see [https.md](https.md):
+
+```bash
+sudo bash scripts/setup-https.sh --fqdn lab.example.com --san "lab,192.168.10.10"
+```
+
+**Manual alternative:** copy [`deploy/nginx/gns3-lab-portal.conf`](../deploy/nginx/gns3-lab-portal.conf)
 to `/etc/nginx/sites-available/`, set your host name and certificate paths,
 enable it, and reload Nginx. Then add to `.env` and restart the portal:
 

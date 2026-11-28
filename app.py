@@ -23,7 +23,7 @@ from urllib.parse import quote, quote_plus, urlsplit
 
 import httpx
 from fastapi import File, FastAPI, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -34,6 +34,7 @@ from argon2.exceptions import InvalidHashError, VerificationError
 
 import portal_auth as auth
 import portal_db as db
+import portal_tls as tls
 
 BASE_DIR = Path(__file__).resolve().parent
 GNS3_URL = os.getenv("GNS3_URL", "http://127.0.0.1:3080").rstrip("/")
@@ -80,6 +81,9 @@ GNS3_SNAPSHOTS_DIR = Path(GNS3_SNAPSHOTS_DIR_VALUE).expanduser() if GNS3_SNAPSHO
 GNS3_ROOT = GNS3_PROJECTS_DIR.parent if GNS3_PROJECTS_DIR else Path("/home/gns3/GNS3")
 GNS3_IMAGES_DIR = Path(os.getenv("GNS3_IMAGES_DIR", "").strip() or GNS3_ROOT / "images" / "QEMU").expanduser()
 APPLIANCE_SEARCH_DIRS = tuple(Path(item.strip()).expanduser() for item in os.getenv("PORTAL_APPLIANCE_SEARCH_DIRS", str(GNS3_ROOT / "images")).split(",") if item.strip())
+TLS_DIR = Path(os.getenv("PORTAL_TLS_DIR", str(BASE_DIR / "data" / "tls"))).expanduser()
+# Written by the root helper that reloads Nginx (scripts/apply-tls.sh); the portal only reads it.
+TLS_STATUS_FILE = Path(os.getenv("PORTAL_TLS_STATUS_FILE", "/run/gns3-lab-portal-tls.status"))
 MAX_APPLIANCE_IMAGE_BYTES = int(os.getenv("PORTAL_MAX_APPLIANCE_IMAGE_BYTES", str(512 * 1024**3)))
 # Native snapshots can take many minutes for large labs. Browsers poll a job
 # status endpoint, so this timeout only governs portal-to-controller traffic.
@@ -2101,6 +2105,183 @@ async def appliance_job_status(request: Request, job_id: str):
     if not job:
         raise HTTPException(404, "Job not found. It may have been cleared after a portal restart.")
     return JSONResponse({key: job.get(key) for key in ("status", "progress_percent", "message")})
+
+
+# --- HTTPS certificates -----------------------------------------------------------
+# The portal makes, checks and stores certificates; Nginx serves them (see docs/https.md).
+
+def tls_store() -> tls.TlsStore:
+    return tls.TlsStore(TLS_DIR, TLS_STATUS_FILE)
+
+
+def tls_admin(request: Request) -> None:
+    require_permission(request, "tls.manage", portal_wide=True)
+
+
+def request_is_https(request: Request) -> bool:
+    return request.url.scheme == "https"   # uvicorn takes it from Nginx's X-Forwarded-Proto
+
+
+def https_back(text: str, kind: str = "error") -> RedirectResponse:
+    return RedirectResponse(f"/admin/https?{kind}={quote_plus(text)}", status_code=303)
+
+
+async def pem_input(upload: UploadFile | None, text: str, limit: int = 256 * 1024) -> bytes:
+    if upload is not None and upload.filename:
+        data = await upload.read(limit + 1)
+        await upload.close()
+        if len(data) > limit:
+            raise tls.TlsError("That file is too large to be a certificate or key.")
+        return data
+    return text.strip().encode()
+
+
+async def activate_certificate(request: Request, certs: list[Any], key: Any, how: str) -> RedirectResponse:
+    """Make a checked certificate active, ask Nginx to load it, and put the old one back if Nginx refuses."""
+    store = tls_store()
+    warnings = tls.check_leaf(certs[0])
+    store.install(certs, key)
+    info = tls.describe(certs[0])
+    audit(audit_actor(request), "https_certificate_installed", info["common_name"], {"how": how, "names": info["names"], "fingerprint": info["fingerprint"], "not_after": info["not_after"]})
+    token = store.request_reload()
+    note = (" " + " ".join(warnings)) if warnings else ""
+    if not store.managed:
+        return https_back(f"Saved. Nginx is not set up to serve it yet: on the server run sudo bash scripts/setup-https.sh --fqdn {info['common_name']}.{note}", "message")
+    result = await asyncio.to_thread(store.wait_for_reload, token, 20)
+    if result is None:
+        return https_back(f"Saved, but Nginx has not confirmed the reload. Check that gns3-lab-portal-tls.path is active.{note}", "message")
+    if result[0] == "error":
+        if store.has_previous():
+            store.restore_previous()
+            store.request_reload()
+        return https_back(f"Nginx refused that certificate ({result[1]}), so the previous one was put back.")
+    return https_back(f"Certificate installed and Nginx reloaded.{note}", "message")
+
+
+@app.get("/admin/https", response_class=HTMLResponse)
+async def https_page(request: Request):
+    if AUTH_ENABLED and not active_portal_session(request):
+        return redirect_login()
+    tls_admin(request)
+    store = tls_store()
+    certs = await asyncio.to_thread(store.active_certificates)
+    return templates.TemplateResponse(request, "admin_https.html", {
+        **base_context(request, "https"), "cert": tls.describe(certs[0]) if certs else None, "chain_length": len(certs), "pending": store.pending_list(),
+        "managed": store.managed, "has_previous": store.has_previous(), "https_now": request_is_https(request), "key_kinds": tls.KEY_KINDS,
+        "max_days": tls.MAX_SELF_SIGNED_DAYS, "tls_dir": str(TLS_DIR),
+    })
+
+
+@app.post("/admin/https/self-signed")
+async def https_self_signed(request: Request, fqdn: str = Form(""), names: str = Form(""), days: int = Form(365), key_kind: str = Form("rsa2048")):
+    tls_admin(request)
+    try:
+        key_bytes, cert_bytes = await asyncio.to_thread(tls.self_signed, fqdn, names, days, key_kind)
+        return await activate_certificate(request, tls.load_certificates(cert_bytes), tls.load_private_key(key_bytes), "self-signed")
+    except tls.TlsError as exc:
+        return https_back(str(exc))
+
+
+@app.post("/admin/https/csr")
+async def https_new_csr(request: Request, fqdn: str = Form(""), names: str = Form(""), key_kind: str = Form("rsa2048"), country: str = Form(""),
+                        state: str = Form(""), city: str = Form(""), organization: str = Form(""), unit: str = Form("")):
+    tls_admin(request)
+    try:
+        main_name, parsed = tls.parse_names(fqdn, names)
+        key_bytes, csr_bytes = await asyncio.to_thread(tls.make_csr, fqdn, names, {"country": country, "state": state, "city": city, "organization": organization, "unit": unit}, key_kind)
+        tls_store().new_pending(main_name, tls.name_labels(parsed), key_bytes, csr_bytes)
+    except tls.TlsError as exc:
+        return https_back(str(exc))
+    audit(audit_actor(request), "https_csr_created", main_name, {"names": tls.name_labels(parsed), "key": key_kind})
+    return RedirectResponse(f"/admin/https?message={quote_plus('Signing request created. Download it and send it to your certificate authority.')}#pending", status_code=303)
+
+
+@app.get("/admin/https/csr/{pending_id}/download")
+async def https_download_csr(request: Request, pending_id: str):
+    tls_admin(request)
+    try:
+        folder = tls_store().pending_folder(pending_id)
+    except tls.TlsError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    name = json.loads((folder / "meta.json").read_text())["fqdn"].replace("*", "wildcard")
+    return Response((folder / "csr.pem").read_bytes(), media_type="application/pkcs10", headers={"Content-Disposition": f'attachment; filename="{name}.csr"'})
+
+
+@app.post("/admin/https/csr/{pending_id}/certificate")
+async def https_certificate_for_csr(request: Request, pending_id: str, certificate_text: str = Form(""), certificate_file: UploadFile | None = File(None)):
+    """The certificate authority's answer to a signing request: it must match the key kept for that request."""
+    tls_admin(request)
+    store = tls_store()
+    try:
+        folder = store.pending_folder(pending_id)
+        certs = tls.order_chain(tls.load_certificates(await pem_input(certificate_file, certificate_text)))
+        key = tls.load_private_key((folder / "key.pem").read_bytes())
+        if not tls.same_public_key(certs[0], key):
+            raise tls.TlsError("That certificate was not issued for this signing request: its public key does not match.")
+        response = await activate_certificate(request, certs, key, "csr")
+    except tls.TlsError as exc:
+        return https_back(str(exc))
+    store.delete_pending(pending_id)
+    return response
+
+
+@app.post("/admin/https/csr/{pending_id}/delete")
+async def https_delete_csr(request: Request, pending_id: str):
+    tls_admin(request)
+    try:
+        tls_store().delete_pending(pending_id)
+    except tls.TlsError as exc:
+        return https_back(str(exc))
+    audit(audit_actor(request), "https_csr_deleted", pending_id)
+    return https_back("Signing request deleted.", "message")
+
+
+@app.post("/admin/https/upload")
+async def https_upload(request: Request, certificate_text: str = Form(""), certificate_file: UploadFile | None = File(None), key_text: str = Form(""),
+                       key_file: UploadFile | None = File(None), key_password: str = Form(""), pfx_file: UploadFile | None = File(None), pfx_password: str = Form("")):
+    """Install a certificate together with its private key (PEM files, or one .pfx)."""
+    tls_admin(request)
+    if not request_is_https(request):
+        return https_back("A private key must not be sent over plain HTTP. Switch the portal to HTTPS first (self-signed is fine), then upload over HTTPS. Or use a signing request, which never sends a key.")
+    try:
+        if pfx_file is not None and pfx_file.filename:
+            key, certs = tls.from_pkcs12(await pem_input(pfx_file, "", 2 * 1024 * 1024), pfx_password)
+        else:
+            certs = tls.load_certificates(await pem_input(certificate_file, certificate_text))
+            key = tls.load_private_key(await pem_input(key_file, key_text), key_password)
+        certs = tls.order_chain(certs)
+        if not tls.same_public_key(certs[0], key):
+            raise tls.TlsError("That private key does not belong to that certificate.")
+        return await activate_certificate(request, certs, key, "upload")
+    except tls.TlsError as exc:
+        return https_back(str(exc))
+
+
+@app.post("/admin/https/rollback")
+async def https_rollback(request: Request):
+    tls_admin(request)
+    store = tls_store()
+    if not store.has_previous():
+        return https_back("There is no previous certificate to restore.")
+    try:
+        store.restore_previous()
+    except tls.TlsError as exc:
+        return https_back(str(exc))
+    audit(audit_actor(request), "https_certificate_restored", "previous")
+    token = store.request_reload()
+    result = await asyncio.to_thread(store.wait_for_reload, token, 20) if store.managed else None
+    if result and result[0] == "error":
+        return https_back(f"Nginx refused the previous certificate too ({result[1]}).")
+    return https_back("The previous certificate is active again.", "message")
+
+
+@app.get("/admin/https/certificate.pem")
+async def https_download_certificate(request: Request):
+    tls_admin(request)
+    certs = await asyncio.to_thread(tls_store().active_certificates)
+    if not certs:
+        raise HTTPException(404, "No certificate is installed yet.")
+    return Response(tls.chain_pem(certs), media_type="application/x-pem-file", headers={"Content-Disposition": 'attachment; filename="portal-certificate.pem"'})
 
 
 @app.post("/admin/impersonate/{username}")

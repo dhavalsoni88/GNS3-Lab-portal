@@ -1,0 +1,6 @@
+[Unit]
+Description=Reload Nginx after the GNS3 Lab Portal installs a certificate
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/gns3-lab-portal-apply-tls @TLS_DIR@
