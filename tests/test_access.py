@@ -281,68 +281,6 @@ def test_lab_limit_is_checked_before_any_lab_is_created(client):
         portal.app.state.gns3_client = original
 
 
-def test_publishing_an_appliance_adds_images_and_template_without_replacing_anything(client):
-    import hashlib
-    import json as jsonlib
-    image = b"QFI\xfb fake disk image"
-    appliance = {
-        "name": "Win Server", "category": "guest", "registry_version": 4,
-        "qemu": {"adapter_type": "e1000", "adapters": 2, "ram": 4096, "arch": "x86_64", "console_type": "vnc", "kvm": "require"},
-        "images": [{"filename": "winserver2019.qcow2", "version": "2019", "md5sum": hashlib.md5(image).hexdigest()}],
-        "versions": [{"name": "2019", "images": {"hda_disk_image": "winserver2019.qcow2"}}],
-    }
-    state = {"templates": [{"name": "Existing router", "template_type": "qemu", "category": "router"}], "images": [], "uploads": [], "posted": []}
-
-    def stub(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/v2/templates" and request.method == "GET":
-            return httpx.Response(200, json=state["templates"])
-        if path == "/v2/templates" and request.method == "POST":
-            state["posted"].append(jsonlib.loads(request.content))
-            return httpx.Response(201, json={})
-        if path == "/v2/computes/local/qemu/images":
-            return httpx.Response(200, json=state["images"])
-        if path.startswith("/v2/computes/local/qemu/images/"):
-            state["uploads"].append((path.rsplit("/", 1)[-1], request.content))
-            return httpx.Response(204)
-        return httpx.Response(404, json={})
-
-    def publish(image_bytes=image, appliance_json=appliance):
-        files = [("appliance_file", ("win.gns3a", jsonlib.dumps(appliance_json).encode(), "application/json"))]
-        if image_bytes is not None:
-            files.append(("image_files", ("winserver2019.qcow2", image_bytes, "application/octet-stream")))
-        return client.post("/admin/appliances", files=files, follow_redirects=False).headers["location"]
-
-    original = portal.app.state.gns3_client
-    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
-    try:
-        login(client, "owner1", "owner1-password-1")
-        assert client.post("/admin/appliances", files=[("appliance_file", ("a.gns3a", b"{}", "application/json"))]).status_code == 403
-        client.post("/logout")
-        login(client, "portaladmin", "initial-admin-password")
-        assert "checksum" in publish(image_bytes=b"tampered") and state["uploads"] == [] and state["posted"] == []
-        assert "Also+upload" in publish(image_bytes=None) and state["posted"] == []
-
-        assert "message=Published" in publish()
-        assert state["uploads"] == [("winserver2019.qcow2", image)]
-        template = state["posted"][0]
-        assert template["name"] == "Win Server 2019" and template["hda_disk_image"] == "winserver2019.qcow2"
-        assert template["ram"] == 4096 and template["platform"] == "x86_64" and "kvm" not in template
-
-        # Publishing never replaces: a same-named template or a different image with the same name is refused.
-        state["templates"].append({"name": "Win Server 2019"})
-        assert "already+exists" in publish()
-        state["templates"].pop()
-        state["images"] = [{"filename": "winserver2019.qcow2", "md5sum": "0" * 32}]
-        assert "never+replaced" in publish() and len(state["uploads"]) == 1 and len(state["posted"]) == 1
-        # The same image already on GNS3 is reused, not uploaded again.
-        state["images"] = [{"filename": "winserver2019.qcow2", "md5sum": hashlib.md5(image).hexdigest()}]
-        assert "message=Published" in publish(image_bytes=None) and len(state["uploads"]) == 1
-        client.post("/logout")
-    finally:
-        portal.app.state.gns3_client = original
-
-
 def test_template_is_copied_in_the_background_with_progress(client, tmp_path, monkeypatch):
     import time
     snapshots_dir = tmp_path / "projects" / "lab-owned" / "snapshots"
@@ -426,3 +364,240 @@ def test_gns3_error_text_never_reaches_users():
     finally:
         portal.app.state.gns3_client = original
     assert refused.value.detail == "GNS3 refused the request (HTTP 409). An administrator can find details in gns3-api.log."
+
+
+# --- appliance publishing ---------------------------------------------------
+
+DISK = b"QFI\xfb fake windows disk"
+
+
+def appliance_file(disk=DISK, name="winserver2019.qcow2", **qemu):
+    import hashlib
+    return {
+        "name": "Win Server", "category": "guest", "registry_version": 4, "usage": "Notes that came with the file",
+        "qemu": {"adapter_type": "e1000", "adapters": 2, "ram": 4096, "arch": "x86_64", "console_type": "vnc", "kvm": "require", **qemu},
+        "images": [{"filename": name, "version": "2019", "md5sum": hashlib.md5(disk).hexdigest(), "filesize": len(disk)}],
+        "versions": [{"name": "2019", "images": {"hda_disk_image": name}}],
+    }
+
+
+@pytest.fixture
+def appliances(tmp_path, monkeypatch, client):
+    """An empty appliance store, a place for disks that already exist, and a GNS3 that records templates."""
+    import json as jsonlib
+    store, elsewhere = tmp_path / "images" / "QEMU", tmp_path / "images" / "old"
+    store.mkdir(parents=True)
+    elsewhere.mkdir()
+    monkeypatch.setattr(portal, "GNS3_IMAGES_DIR", store)
+    monkeypatch.setattr(portal, "APPLIANCE_SEARCH_DIRS", (tmp_path / "images",))
+    state = {"templates": [{"name": "Existing router", "template_type": "qemu", "category": "router"}], "posted": [], "store": store, "elsewhere": elsewhere}
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/templates" and request.method == "POST":
+            state["posted"].append(jsonlib.loads(request.content))
+            return httpx.Response(201, json={})
+        if request.url.path == "/v2/templates":
+            return httpx.Response(200, json=state["templates"])
+        return httpx.Response(404, json={})
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    login(client, "portaladmin", "initial-admin-password")
+    yield state
+    client.post("/logout")
+    portal.app.state.gns3_client = original
+
+
+def check_appliance(client, appliance=None):
+    import json as jsonlib
+    response = client.post("/admin/appliances", files={"appliance_file": ("win.gns3a", jsonlib.dumps(appliance or appliance_file()).encode(), "application/json")}, follow_redirects=False)
+    assert response.status_code == 303, response.text
+    return response.headers["location"]
+
+
+def wait_for_job(client, location):
+    import time
+    page = client.get(location)
+    job_url = page.text.split('data-appliance-job-url="')[1].split('"')[0]
+    for _ in range(200):
+        job = client.get(job_url).json()
+        if job["status"] != "working":
+            return job
+        time.sleep(0.05)
+    raise AssertionError("appliance job did not finish")
+
+
+def test_appliance_review_says_where_each_disk_is_and_where_a_missing_one_goes(client, appliances):
+    review = check_appliance(client)
+    page = client.get(review).text
+    store = appliances["store"]
+    assert str(store) in page and "Missing" in page and f"{store}/winserver2019.qcow2" in page
+    assert "Every disk has to be in the store" in page                     # nothing to publish yet
+
+    (appliances["elsewhere"] / "winserver2019.qcow2").write_bytes(DISK)
+    page = client.get(review).text
+    assert "Found elsewhere" in page and f"{appliances['elsewhere']}/winserver2019.qcow2" in page and "will be moved" in page
+
+    (store / "winserver2019.qcow2").write_bytes(DISK + b"more")            # same name, different size
+    assert "Does not match" in client.get(review).text
+    (store / "winserver2019.qcow2").write_bytes(DISK)
+    assert "In the store" in client.get(review).text and "Every disk has to be in the store" not in client.get(review).text
+
+
+def test_appliance_disk_is_streamed_into_the_store_and_checked(client, appliances):
+    review = check_appliance(client)
+    upload = review.replace("/admin/appliances/", "/admin/appliances/") + "/images/winserver2019.qcow2"
+    store = appliances["store"]
+    assert client.put(upload, content=b"x" * len(DISK)).status_code == 422                 # right size, wrong checksum
+    assert client.put(upload, content=DISK + b"1").status_code == 422                        # wrong size
+    assert list(store.iterdir()) == []                                                       # nothing left behind
+    assert client.put(review + "/images/other.qcow2", content=DISK).status_code == 404      # only the disks this appliance names
+    assert client.put(upload, content=DISK).status_code == 200
+    assert (store / "winserver2019.qcow2").read_bytes() == DISK
+    assert client.put(upload, content=DISK).status_code == 409                               # never replaced
+    assert client.put(upload, content=DISK, headers={"Origin": "https://evil.example"}).status_code == 403
+    client.post("/logout")
+    login(client, "owner1", "owner1-password-1")
+    assert client.put(upload, content=DISK).status_code == 403                               # only Platform Admins
+    client.post("/logout")
+    login(client, "portaladmin", "initial-admin-password")
+
+
+def test_publishing_moves_found_disks_and_registers_the_template_with_notes(client, appliances):
+    review = check_appliance(client)
+    assert client.post(review + "/publish", data={}, follow_redirects=False).headers["location"].count("Not+ready") == 1   # disk missing
+    source = appliances["elsewhere"] / "winserver2019.qcow2"
+    source.write_bytes(DISK)
+    started = client.post(review + "/publish", data={"notes": "Login: administrator. Set the password on first boot."}, follow_redirects=False)
+    job = wait_for_job(client, started.headers["location"])
+    assert job["status"] == "completed" and job["progress_percent"] == 100
+    assert not source.exists() and (appliances["store"] / "winserver2019.qcow2").read_bytes() == DISK     # moved, not copied
+    template = appliances["posted"][0]
+    assert template["name"] == "Win Server 2019" and template["hda_disk_image"] == "winserver2019.qcow2"
+    assert template["usage"] == "Login: administrator. Set the password on first boot."                # shown under Usage in GNS3
+    assert template["ram"] == 4096 and template["platform"] == "x86_64" and "kvm" not in template
+    assert "Existing router" in [item["name"] for item in appliances["templates"]]
+
+    appliances["templates"].append({"name": "Win Server 2019"})                                          # same name: refused
+    assert "already+exists" in client.post(review + "/publish", data={}, follow_redirects=False).headers["location"]
+    assert len(appliances["posted"]) == 1
+
+
+def test_a_found_disk_with_the_wrong_checksum_is_left_where_it_is(client, appliances):
+    review = check_appliance(client)
+    source = appliances["elsewhere"] / "winserver2019.qcow2"
+    source.write_bytes(b"y" * len(DISK))                                                                 # same size, different content
+    job = wait_for_job(client, client.post(review + "/publish", data={}, follow_redirects=False).headers["location"])
+    assert job["status"] == "failed" and "checksum" in job["message"]
+    assert source.exists() and not (appliances["store"] / "winserver2019.qcow2").exists() and appliances["posted"] == []
+
+
+def test_only_safe_qemu_options_are_accepted(client, appliances):
+    ok = check_appliance(client, appliance_file(options="-nographic -cpu host -smp 2"))
+    assert ok.startswith("/admin/appliances/")
+    refused = client.post("/admin/appliances", files={"appliance_file": ("w.gns3a", __import__("json").dumps(appliance_file(options="-nographic -virtfs local,path=/,mount_tag=h,security_model=none")).encode(), "application/json")}, follow_redirects=False)
+    assert "-virtfs" in refused.headers["location"] and "/admin/appliances/" not in refused.headers["location"].split("?")[0][len("/admin/appliances"):]
+
+
+# --- review findings -------------------------------------------------------------
+
+def test_simultaneous_requests_cannot_exceed_the_lab_limit(client):
+    import asyncio
+    created = []
+
+    async def slow_stub(request):
+        if request.method == "POST" and request.url.path == "/v2/projects":
+            await asyncio.sleep(0.3)
+            created.append(1)
+            return httpx.Response(201, json={"project_id": f"race-{len(created)}", "name": "R", "path": "/tmp/none"})
+        if request.url.path.startswith("/v2/projects/"):
+            return httpx.Response(200, json={"project_id": "x", "name": "R", "path": "/tmp/none"})
+        return httpx.Response(200, json=[])
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(slow_stub))
+    try:
+        login(client, "portaladmin", "initial-admin-password")
+        client.post("/admin/users", data={"username": "racer1", "password": "racer1-password-1", "roles": ["lab_editor"]})
+        client.post("/logout")
+        login(client, "racer1", "racer1-password-1")
+        cookies = dict(client.cookies)
+
+        async def go():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=portal.app), base_url="http://testserver", cookies=cookies) as many:
+                return await asyncio.gather(*[many.post("/projects", data={"name": f"R{i}"}) for i in range(6)])
+
+        asyncio.run(go())
+        assert len(created) == portal.lab_limit("racer1") == 2          # six at once, two allowed
+        assert portal.app.state.lab_reservations["racer1"] == 0         # slots are released afterwards
+    finally:
+        portal.app.state.gns3_client = original
+
+
+def test_labs_deleted_in_gns3_do_not_count_against_the_limit(client):
+    projects = []
+
+    def stub(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v2/projects":
+            return httpx.Response(201, json={"project_id": "fresh", "name": "F", "path": "/tmp/none"})
+        if request.url.path == "/v2/projects":
+            return httpx.Response(200, json=projects)
+        return httpx.Response(200, json={"project_id": "fresh", "name": "F", "path": "/tmp/none"})
+
+    original = portal.app.state.gns3_client
+    portal.app.state.gns3_client = httpx.AsyncClient(transport=httpx.MockTransport(stub))
+    try:
+        login(client, "portaladmin", "initial-admin-password")
+        client.post("/admin/users", data={"username": "ghost1", "password": "ghost1-password-1", "roles": ["lab_editor"]})
+        client.post("/logout")
+        for ghost in ("ghost-a", "ghost-b"):
+            portal.set_lab_owner(ghost, "ghost1")
+        login(client, "ghost1", "ghost1-password-1")
+        assert "/projects/fresh" in client.post("/projects", data={"name": "Allowed"}, follow_redirects=False).headers["location"]   # both owned labs are gone from GNS3
+        projects[:] = [{"project_id": "ghost-a"}, {"project_id": "ghost-b"}]                                                      # now they exist
+        assert "limit" in client.post("/projects", data={"name": "Too many"}, follow_redirects=False).headers["location"]
+        client.post("/logout")
+    finally:
+        portal.app.state.gns3_client = original
+
+
+def test_origin_check_refuses_null_origins_and_ports_the_proxy_dropped(client, monkeypatch):
+    monkeypatch.setattr(portal, "PORTAL_PUBLIC_URL", "")
+    assert client.post("/logout", headers={"Origin": "null"}).status_code == 403
+    assert client.post("/logout", headers={"Origin": "https://lab.example.com:8443", "Host": "lab.example.com"}).status_code == 403
+    assert client.post("/logout", headers={"Origin": "https://lab.example.com:8443", "Host": "lab.example.com:8443"}, follow_redirects=False).status_code == 303
+
+
+def test_half_copied_template_folders_are_cleaned_up_at_start(tmp_path, monkeypatch):
+    import os
+    import time
+    root = tmp_path / "templates"
+    root.mkdir()
+    monkeypatch.setattr(portal, "LAB_TEMPLATE_DIR", root)
+    old_orphan, new_orphan, other = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222", "my-own-folder"
+    for name in (old_orphan, new_orphan, other):
+        (root / name).mkdir()
+    for name in (old_orphan, other):
+        os.utime(root / name, (time.time() - 3 * 86400,) * 2)
+    portal.remove_orphan_template_dirs()
+    assert {path.name for path in root.iterdir()} == {other, new_orphan}   # only the old, UUID-named orphan went
+
+
+def test_a_disk_on_another_filesystem_is_copied_checked_and_then_removed(client, appliances, monkeypatch):
+    import os
+    import shutil
+    import tempfile
+    if not os.path.isdir("/dev/shm") or os.stat("/dev/shm").st_dev == os.stat(appliances["elsewhere"]).st_dev:
+        pytest.skip("needs a second filesystem")
+    other_disk_store = Path(tempfile.mkdtemp(dir="/dev/shm"))
+    try:
+        monkeypatch.setattr(portal, "GNS3_IMAGES_DIR", other_disk_store)
+        review = check_appliance(client)
+        source = appliances["elsewhere"] / "winserver2019.qcow2"
+        source.write_bytes(DISK)
+        job = wait_for_job(client, client.post(review + "/publish", data={}, follow_redirects=False).headers["location"])
+        assert job["status"] == "completed"
+        assert (other_disk_store / "winserver2019.qcow2").read_bytes() == DISK and not source.exists()
+        assert [path.name for path in other_disk_store.iterdir()] == ["winserver2019.qcow2"]     # no .part file left
+    finally:
+        shutil.rmtree(other_disk_store, ignore_errors=True)

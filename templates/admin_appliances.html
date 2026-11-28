@@ -6,15 +6,26 @@
 </div>
 
 <section class="card form-stack">
+  <h2>Where appliance disks are stored</h2>
+  <p style="margin:0"><code>{{ store.path }}</code> on the GNS3 server. This is GNS3's own QEMU image folder, so every lab sees a disk as soon as it is there.</p>
+  {% if not store.exists %}
+    <p class="error" role="alert">That folder does not exist. Set <code>GNS3_IMAGES_DIR</code> in <code>.env</code> to GNS3's QEMU images folder.</p>
+  {% elif not store.writable %}
+    <p class="error" role="alert">The portal cannot write there, so it cannot add or move disks. On the server run: <code>sudo setfacl -R -m u:{{ store.user }}:rwX {{ store.path }}</code></p>
+  {% else %}
+    <p class="muted" style="margin:0">Writable. {{ store.free_bytes | storage_size }} free.</p>
+  {% endif %}
+  <p class="muted" style="margin:0">Disks already on the server are looked for under {% for path in store.search_dirs %}<code>{{ path }}</code>{% if not loop.last %}, {% endif %}{% endfor %} and moved into the store when you publish (<code>PORTAL_APPLIANCE_SEARCH_DIRS</code> changes this).</p>
+</section>
+
+<section class="card form-stack">
   <h2>Publish an appliance</h2>
-  <form class="form-stack" method="post" action="/admin/appliances" enctype="multipart/form-data" onsubmit="this.querySelector('button').disabled=true">
+  <form class="form-stack" method="post" action="/admin/appliances" enctype="multipart/form-data">
     <label>Appliance file (.gns3a)<input type="file" name="appliance_file" accept=".gns3a,application/json" required></label>
     <label>Version <span class="muted">(optional; the first version in the file is used if blank)</span><input name="version" maxlength="100" placeholder="e.g. 2019"></label>
-    <label>Disk images<input type="file" name="image_files" multiple></label>
-    <p class="muted" style="margin:0">Upload the images the chosen version names. Images GNS3 already has can be left out. Each image is checked against the checksum in the appliance file. Large images take a while to upload.</p>
-    <div><button class="primary big">Publish to all labs</button></div>
+    <div><button class="primary big">Check disks</button></div>
   </form>
-  <p class="muted" style="margin:0">QEMU appliances only for now. Get appliance files from the GNS3 marketplace or the vendor.</p>
+  <p class="muted" style="margin:0">The next page shows which disks the server already has and where any missing one must go. Get appliance files from the GNS3 marketplace or the vendor. QEMU appliances only for now.</p>
 </section>
 
 <h2>Appliances in GNS3</h2>

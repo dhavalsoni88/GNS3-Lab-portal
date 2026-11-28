@@ -51,7 +51,9 @@ AUDITOR_PW=$(secret db-auditor-password root)
 install -d -o mysql -g adm -m 2750 /var/log/mysql
 # Server-level audit log: connections, failed logins, schema (DDL) and
 # privilege (DCL) changes by every account, written to a rotated file.
-cat > /etc/mysql/mariadb.conf.d/60-gns3-portal-audit.cnf <<'CNF'
+AUDIT_CNF=/etc/mysql/mariadb.conf.d/60-gns3-portal-audit.cnf
+NEW_CNF=$(mktemp)
+cat > "$NEW_CNF" <<'CNF'
 [mariadb]
 plugin_load_add = server_audit
 server_audit = FORCE_PLUS_PERMANENT
@@ -62,7 +64,12 @@ server_audit_file_path = /var/log/mysql/server_audit.log
 server_audit_file_rotate_size = 104857600
 server_audit_file_rotations = 30
 CNF
-systemctl restart mariadb
+# Restart only when the settings changed: a restart drops every connection, including other apps' on a shared server.
+if ! cmp -s "$NEW_CNF" "$AUDIT_CNF"; then
+  install -m 644 "$NEW_CNF" "$AUDIT_CNF"
+  systemctl restart mariadb
+fi
+rm -f "$NEW_CNF"
 
 mariadb --protocol=socket <<SQL
 CREATE DATABASE IF NOT EXISTS \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

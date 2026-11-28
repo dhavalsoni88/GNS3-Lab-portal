@@ -117,6 +117,14 @@ purpose when:
 - MariaDB holds no users while an old SQLite `audit.db` exists. Finish the
   [SQLite move](upgrading.md#moving-from-sqlite-to-mariadb) first.
 
+### "Cross-site request refused" on every form
+
+The portal compares the browser's `Origin` header with the `Host` header the
+reverse proxy forwards. If the portal is served on a port other than 80 or
+443 and the proxy sends `Host $host`, the port is lost and every form is
+refused. Use `proxy_set_header Host $http_host;` (the Nginx sample does), or
+set `PORTAL_PUBLIC_URL` to the full address including the port.
+
 ### Memory shows a percentage only
 
 GNS3 reports memory usage as a percentage without totals; that is expected.

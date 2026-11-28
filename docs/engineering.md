@@ -102,6 +102,15 @@ revisit them. The main one: sessions, jobs, SAML requests and sign-in limits
 are kept in process memory, so the portal runs as a single uvicorn worker.
 Move them to MariaDB before building the cluster phase.
 
+## Rehearsing an upgrade
+
+`scripts/upgrade.sh` stops the service and rewrites `.env`, so rehearse it
+before changing it. CI only runs `shellcheck`; the full run needs systemd and
+a clean server. In a throwaway VM or container: check out the previous
+release in `/opt/gns3-lab-portal`, create data with it (a SQLite database
+for a v8.x rehearsal), `git pull` the new code, run `scripts/upgrade.sh`,
+then run it a second time (it must be a quiet routine update) and sign in.
+
 ## Releasing
 
 1. Move the **Unreleased** notes in `CHANGELOG.md` under a dated version heading,

@@ -124,6 +124,14 @@ for _ in $(seq 1 30); do
     [[ "$MODE" == migrate ]] && echo "Everyone signs in again. $SQLITE is kept unchanged as an archive."
     [[ -n "${KEY_ROTATED:-}" ]] && echo "A new PORTAL_SECRET_KEY was written to .env. If you use Active Directory, re-enter its service-account password under Administration > Identity."
     echo "Previous .env saved as $ENV_FILE.backup-$STAMP."
+    # Publishing appliances writes disks into GNS3's QEMU image folder; say so if the portal cannot.
+    IMAGES_DIR=$(env_get GNS3_IMAGES_DIR)
+    if [[ -z "$IMAGES_DIR" ]]; then
+      PROJECTS_DIR=$(env_get GNS3_PROJECTS_DIR)
+      IMAGES_DIR="$(dirname "${PROJECTS_DIR:-/home/gns3/GNS3/projects}")/images/QEMU"
+    fi
+    runuser -u "$SERVICE_USER" -- test -w "$IMAGES_DIR" 2>/dev/null \
+      || echo "NOTE: publishing appliances needs write access to $IMAGES_DIR. To allow it: sudo setfacl -R -m u:$SERVICE_USER:rwX $IMAGES_DIR"
     exit 0
   fi
   sleep 1
