@@ -1,12 +1,12 @@
 # ADR-0001: Build appliances from requirement-aware profiles with install, check and seal hooks
 
-**Status:** Accepted (implemented in v9.4.0)
+**Status:** Accepted (implemented in v9.2.0)
 **Date:** 2026-11-28
 **Deciders:** Portal owner (Platform Admin for the `ironman` lab)
 
 ## Context
 
-The portal's appliance builder (v9.3.0) builds an Ubuntu-based GNS3 appliance from a
+The portal's appliance builder (first version) builds an Ubuntu-based GNS3 appliance from a
 *recipe*: `deploy/builder/recipes/<id>/recipe.json` plus one `install.sh`. The builder
 service (`scripts/appliance-builder.py`, user `gns3`, KVM) clones the baseline, boots it,
 runs packages, `install.sh` and the admin's script over SSH, runs one generic
@@ -90,7 +90,7 @@ Concretely:
 | Scalability | Poor: no requirement checks, so a 12 GiB Splunk VM can start on a host that cannot hold it |
 | Team familiarity | High |
 
-**Pros:** no work, no risk to v9.3.0.
+**Pros:** no work, no risk to the first builder version.
 **Cons:**
 - No check step, so a broken install can be published.
 - One seal for every application.

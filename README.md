@@ -150,7 +150,7 @@ sudo bash /opt/gns3-lab-portal/scripts/upgrade.sh
 
 ## Project status
 
-The current release is **v9.4.0**: requirement-aware appliance recipes with import; HTTPS and certificate management from the
+The current release is **v9.2.0**: requirement-aware appliance recipes with import; HTTPS and certificate management from the
 portal, the appliance library and builder, lab limits, and the graphite
 interface with a Light, Dark or System theme, on top of the v9.0 MariaDB, roles,
 Active Directory, SSO and tamper-resistant audit foundation. Automated tests
