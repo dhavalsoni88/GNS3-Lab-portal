@@ -73,7 +73,7 @@ def github(monkeypatch, files, release=None, licence="mit", raw=""):
     answers = {api: {"full_name": "acme/vuln-app", "default_branch": "main", "description": "A vulnerable app", "size": 2048,
                      "html_url": "https://github.com/acme/vuln-app", "license": {"spdx_id": licence.upper()} if licence else None},
                f"{api}/commits/main": {"sha": "c0ffee" * 6 + "abcd"},
-               f"{api}/contents?ref={'c0ffee' * 6 + 'abcd'}": [{"name": f, "type": "file"} for f in files]}
+               f"{api}/git/trees/{'c0ffee' * 6 + 'abcd'}?recursive=1": {"tree": [{"path": f, "type": "blob"} for f in files]}}
 
     def fetch_json(url):
         if url == f"{api}/releases/latest":
@@ -92,6 +92,34 @@ def test_github_compose_dockerfile_installer_and_release(tmp_path, monkeypatch):
     assert s["services"] == ["vuln-app-app.service"] and [p["guest_port"] for p in s["ports"]] == [3306, 8080] and "docker.io" in s["packages"]
     assert not s["requires_license"] and "checkout --quiet --detach c0ffee" in draft["hooks"]["install-app.sh"] and "docker compose -f docker-compose.yml up -d --build" in draft["hooks"]["install-app.sh"]
     bash_ok(draft["hooks"])
+
+    # crAPI's layout: compose in a subfolder, ports bound to ${LISTEN_IP:-127.0.0.1}, container limits, commented ports
+    crapi = """services:
+  web:
+    ports:
+      - "${LISTEN_IP:-127.0.0.1}:8888:80"   # web
+    deploy:
+      resources:
+        limits:
+          cpus: '0.8'
+          memory: 384M
+  db:
+    #ports:
+    #  - "${LISTEN_IP:-127.0.0.1}:5432:5432"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2G
+"""
+    github(monkeypatch, ["README.md", "deploy/docker/docker-compose.yml", "deploy/docker/.env", "tests/docker-compose.yml", "services/web/Dockerfile"], raw=crapi)
+    draft = sources.draft("https://github.com/acme/vuln-app", tmp_path, print, set(), set())
+    s, install = draft["settings"], draft["hooks"]["install-app.sh"]
+    assert "WorkingDirectory=/opt/vuln-app/deploy/docker" in install and "Environment=LISTEN_IP=0.0.0.0" in install
+    assert [p["guest_port"] for p in s["ports"]] == [8888] and s["cpus"] == 3 and s["ram"] == 4096   # 2432 MiB of limits + room for the OS
+    assert "Nothing listens on port 8888" in draft["hooks"]["check-app.sh"] and any("LISTEN_IP" in note for note in draft["notes"])
+    bash_ok(draft["hooks"])
+    assert sources.compose_limits("limits:\n  memory: 6G\n  cpus: 2\n") == (6144, 2.0)
 
     github(monkeypatch, ["Dockerfile"], licence="", raw="FROM nginx\nEXPOSE 80/tcp 443\n")
     draft = sources.draft("https://github.com/acme/vuln-app", tmp_path, print, set(), set())

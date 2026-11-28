@@ -5,6 +5,18 @@ Releases up to v8.6 were delivered as update packages; their install steps
 are kept under **Upgrade notes**. For upgrading an installation, see
 [docs/upgrading.md](docs/upgrading.md).
 
+## v9.4.1 — 2026-11-28
+
+### Fixes
+
+- **Analysing GitHub repositories whose compose file is in a subfolder**, such as OWASP crAPI
+  (`deploy/docker/docker-compose.yml`). Compose files up to three folders down are found, test and
+  example folders are skipped, and the service runs in that folder so its `.env` applies.
+- Ports written as `"${LISTEN_IP:-127.0.0.1}:8888:80"` are read, and such variables are set to `0.0.0.0`
+  in the service, so lab machines can reach the application instead of only the VM itself.
+- Memory and CPUs are sized from the compose file's container limits (`deploy.resources.limits`).
+- The generated check now fails when a published port never opens (it used to wait and pass).
+
 ## v9.4.0 — 2026-11-28
 
 Upgrade with `git pull` followed by `sudo bash scripts/upgrade.sh` (it creates the new

@@ -16,6 +16,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import posixpath
 import re
 import shlex
 import subprocess
@@ -29,7 +30,9 @@ import portal_builder as pb
 URL = re.compile(r"https?://[^\s'\"<>]+")
 GITHUB = re.compile(r"^https://github\.com/([A-Za-z0-9][A-Za-z0-9-]{0,38})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:/(?:tree|blob|releases)(?:/.*)?)?/?$")
 SERVICE_FILE = re.compile(r"\./(?:usr/)?lib/systemd/system/([A-Za-z0-9._-]+\.service)$")
-COMPOSE_PORT = re.compile(r"""^\s*-\s*["']?(?:[\d.]+:)?(\d{1,5})(?:-\d+)?:\d{1,5}(?:/tcp)?["']?\s*$""", re.M)
+COMPOSE_PORT = re.compile(r"""^\s*-\s*["']?(?:[^:\s"'#]+:)?(\d{1,5})(?:-\d+)?:\d{1,5}(?:/tcp)?["']?\s*(?:#.*)?$""", re.M)
+LOCAL_ONLY = re.compile(r"\$\{([A-Z_][A-Z0-9_]*):-127\.0\.0\.1\}")
+LIMITS = re.compile(r"^\s*limits:\s*\n((?:\s+(?:cpus|memory):.*\n?)+)", re.M)
 EXPOSE = re.compile(r"^\s*EXPOSE\s+(.+)$", re.M | re.I)
 OPEN_LICENCES = {"mit", "apache-2.0", "gpl-2.0", "gpl-3.0", "agpl-3.0", "lgpl-2.1", "lgpl-3.0", "bsd-2-clause", "bsd-3-clause",
                  "mpl-2.0", "isc", "unlicense", "epl-2.0", "cc0-1.0", "zlib", "bsl-1.0", "artistic-2.0"}
@@ -156,6 +159,25 @@ def sizing(installed_bytes: int, download_bytes: int = 0, ram: int = 2048) -> di
     }
 
 
+def compose_ports(text: str) -> list[int]:
+    """Published host ports; ${VAR:-127.0.0.1}:8888:80 counts as 8888. Commented lines are ignored."""
+    plain = re.sub(r"\$\{[^}]*\}", "ip", text)
+    return sorted({int(p) for p in COMPOSE_PORT.findall(plain) if 0 < int(p) < 65536})
+
+
+def compose_limits(text: str) -> tuple[int, float]:
+    """Memory (MiB) and CPUs the compose file's deploy.resources.limits add up to."""
+    memory, cpus = 0, 0.0
+    for block in LIMITS.findall(text):
+        for key, value in re.findall(r"(cpus|memory):\s*['\"]?([\d.]+[a-zA-Z]*)", block):
+            if key == "cpus":
+                cpus += float(re.match(r"[\d.]+", value)[0])
+            else:
+                number, unit = re.match(r"([\d.]+)([a-zA-Z]*)", value).groups()
+                memory += int(float(number) * {"g": 1024, "gb": 1024, "m": 1, "mb": 1, "k": 1 / 1024, "kb": 1 / 1024}.get(unit.lower(), 1 / 1024**2))
+    return memory, cpus
+
+
 def _unique_id(name: str, taken: set[str]) -> str:
     base = pb.slug(name)[:36] or "app"
     candidate, n = base, 2
@@ -259,8 +281,10 @@ def github_draft(repo: str, work: Path, say: Callable[[str], None], taken: set[s
     name = repo.split("/", 1)[1]
     branch = info.get("default_branch") or "main"
     commit = fetch_json(f"{api}/commits/{urllib.parse.quote(branch)}")["sha"]
-    files = {item["name"] for item in fetch_json(f"{api}/contents?ref={commit}") if isinstance(item, dict) and item.get("type") == "file"}
-    say(f"Repository {repo}, branch {branch} at {commit[:12]}, files: {', '.join(sorted(files)[:40])}")
+    tree = fetch_json(f"{api}/git/trees/{commit}?recursive=1").get("tree", [])
+    paths = {item["path"] for item in tree if isinstance(item, dict) and item.get("type") == "blob" and isinstance(item.get("path"), str)}
+    files = {path for path in paths if "/" not in path}
+    say(f"Repository {repo}, branch {branch} at {commit[:12]}, {len(paths)} files; top level: {', '.join(sorted(files)[:40])}")
     licence = ((info.get("license") or {}).get("spdx_id") or "").lower()
     licence_fields = {"requires_license": licence not in OPEN_LICENCES, "license_url": info.get("html_url", "")}
     licence_note = f"Licence: {licence.upper() or 'none declared'}." + ("" if licence in OPEN_LICENCES else " Not a common open-source licence, so the form asks for acceptance.")
@@ -287,13 +311,21 @@ def github_draft(repo: str, work: Path, say: Callable[[str], None], taken: set[s
 git clone --quiet https://github.com/{repo}.git {folder}
 git -C {folder} checkout --quiet --detach {commit}
 """
-    compose = next((f for f in COMPOSE_FILES if f in files), "")
+    # The shallowest compose file wins (crAPI keeps its in deploy/docker); examples and tests are skipped.
+    composes = sorted((p for p in paths if posixpath.basename(p) in COMPOSE_FILES and p.count("/") <= 3
+                       and not re.search(r"(^|/)(tests?|examples?|samples?|\.github)/", p)), key=lambda p: (p.count("/"), len(p)))
+    compose = composes[0] if composes else ""
+    environment: list[str] = []
+    memory, cpu_total = 0, 0.0
     if compose or "Dockerfile" in files:
         text = fetch_text(f"https://raw.githubusercontent.com/{repo}/{commit}/{compose or 'Dockerfile'}")
         if compose:
-            ports = sorted({int(p) for p in COMPOSE_PORT.findall(text) if 0 < int(p) < 65536})
-            start, stop, kind = f"/usr/bin/docker compose -f {compose} up -d --build", f"/usr/bin/docker compose -f {compose} down", "oneshot"
-            running = f"docker compose -f {q(compose)} ps --status running -q | grep -q ."
+            ports = compose_ports(text)
+            memory, cpu_total = compose_limits(text)
+            environment = sorted(set(LOCAL_ONLY.findall(text)))   # ports bound to 127.0.0.1 unless set: open them to the lab
+            name_in_dir = posixpath.basename(compose)
+            start, stop, kind = f"/usr/bin/docker compose -f {name_in_dir} up -d --build", f"/usr/bin/docker compose -f {name_in_dir} down", "oneshot"
+            running = f"docker compose -f {q(name_in_dir)} ps --status running -q | grep -q ."
         else:
             ports = sorted({int(p.split("/")[0]) for line in EXPOSE.findall(text) for p in line.split() if p.split("/")[0].isdigit()})
             image = f"gns3-lab/{pb.slug(name)}:{commit[:12]}"
@@ -301,6 +333,7 @@ git -C {folder} checkout --quiet --detach {commit}
             start, stop, kind = f"/usr/bin/docker run --rm --name {pb.slug(name)} {publish} {image}".replace("  ", " "), f"/usr/bin/docker stop {pb.slug(name)}", "simple"
             running = f"docker ps -q --filter name=^{pb.slug(name)}$ | grep -q ."
         build_image = "" if compose else f"docker build -t {q(image)} {folder}\n"
+        workdir = posixpath.join(folder, posixpath.dirname(compose)) if compose else folder
         install = clone + build_image + f"""cat > /etc/systemd/system/{unit} <<'UNIT'
 [Unit]
 Description={repo} (docker)
@@ -309,8 +342,8 @@ After=docker.service network-online.target
 [Service]
 Type={kind}
 {"RemainAfterExit=yes" if kind == "oneshot" else "Restart=on-failure"}
-WorkingDirectory={folder}
-ExecStart={start}
+WorkingDirectory={workdir}
+{"".join(f"Environment={var}=0.0.0.0" + chr(10) for var in environment)}ExecStart={start}
 ExecStop={stop}
 TimeoutStartSec=1800
 [Install]
@@ -320,15 +353,24 @@ systemctl daemon-reload
 systemctl enable --now {unit}
 """
         check = f"""set -euo pipefail
-cd {folder}
+cd {workdir}
 for _ in $(seq 1 90); do {running} && break; sleep 2; done
 {running} || {{ echo "The containers are not running: journalctl -u {unit}" >&2; exit 1; }}
-""" + "".join(f"for _ in $(seq 1 60); do curl -fs -o /dev/null http://127.0.0.1:{p}/ && break; ss -ltn | grep -q ':{p} ' && break; sleep 2; done\n" for p in ports) + f'echo "PASS: {repo} runs in docker."\n'
+""" + "".join(f"for _ in $(seq 1 60); do ss -ltn | grep -q ':{p} ' && break; sleep 2; done\n"
+                f"ss -ltn | grep -q ':{p} ' || {{ echo 'Nothing listens on port {p}' >&2; exit 1; }}\n" for p in ports) + f'echo "PASS: {repo} runs in docker."\n'
+        ram = max(4096, 512 * math.ceil((memory + 1536) / 512)) if memory else 4096
+        cpus = min(16, max(2, math.ceil(cpu_total)))
         notes = [f"From {repo} at commit {commit[:12]}, run with docker {'compose (' + compose + ')' if compose else '(Dockerfile)'} as {unit}. {licence_note}",
                  "Container images are pulled or built during the build and kept in the appliance, so clones start without internet.",
                  ("Ports found: " + ", ".join(map(str, ports)) + ".") if ports else "No published ports found; check the application's documentation."]
+        if memory:
+            notes.append(f"The compose file limits its containers to {memory} MiB and {cpu_total:g} CPUs in all; sized at {ram} MiB and {cpus} CPUs to leave room for Ubuntu and Docker.")
+        if environment:
+            notes.append(f"The compose file binds its ports to 127.0.0.1 unless {', '.join(environment)} is set; the service sets {', '.join(v + '=0.0.0.0' for v in environment)} so lab machines can reach it.")
+        elif compose and re.search(r"^\s*-\s*[\"']?127\.0\.0\.1:", text, re.M):
+            notes.append("Some ports are bound to 127.0.0.1 in the compose file, so lab machines cannot reach them. Change that in install-app.sh if they should.")
         return {"id": _unique_id(name, taken),
-                "settings": {**base, "label": name[:80], **sizing(info.get("size", 0) * 1024 * 4, ram=4096), "min_free_gib": 10, "disk_gb": 32, **licence_fields,
+                "settings": {**base, "label": name[:80], **sizing(info.get("size", 0) * 1024 * 4, ram=ram), "cpus": cpus, "min_cpus": min(cpus, 2), "min_free_gib": 10, "disk_gb": 32, **licence_fields,
                              "services": [unit], "ports": [{"name": f"port-{p}", "guest_port": p} for p in ports],
                              "packages": ["docker.io", "docker-compose-v2", "git", "curl"],
                              "usage": f"{repo} at commit {commit[:12]}, started by {unit} at boot." + (f" Ports: {', '.join(map(str, ports))}." if ports else "")},
@@ -346,7 +388,7 @@ for _ in $(seq 1 90); do {running} && break; sleep 2; done
                           "seal-app.sh": SEAL_REVIEW},
                 "notes": [f"From {repo} at commit {commit[:12]}, installed by running its {script} as root. {licence_note}",
                           "Read that script in the repository: it runs as root in the build VM. Write a real check-app.sh."]}
-    raise ValueError(f"{repo} has no .deb release, compose file, Dockerfile or install.sh at its top level, so there is no safe way to guess how to install it. Use the Custom application instead.")
+    raise ValueError(f"{repo} has no .deb release, compose file (top level or up to 3 folders down), top-level Dockerfile or install.sh, so there is no safe way to guess how to install it. Use the Custom application instead.")
 
 
 def draft(source: str, work: Path, say: Callable[[str], None], taken: set[str], builtin: set[str]) -> dict[str, Any]:
